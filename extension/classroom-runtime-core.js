@@ -31,6 +31,14 @@
   const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
   const DOCS_KIND_PROVIDER = { document: 'google_docs', presentation: 'google_slides', spreadsheets: 'google_sheets', forms: 'google_forms' };
   const PROVIDER_DOCS_KIND = { google_docs: 'document', google_slides: 'presentation', google_sheets: 'spreadsheets', google_forms: 'forms' };
+  const CLASSROOM_WORK_DOMAINS = Object.freeze([
+    'classroom.google.com', 'docs.google.com', 'drive.google.com', 'sheets.google.com',
+    'slides.google.com', 'forms.google.com', 'forms.gle',
+  ]);
+  const CLASSROOM_SCOPE_RESERVED_ROOTS = Object.freeze([
+    'youtube.com', 'youtube-nocookie.com', 'youtu.be', 'accounts.google.com',
+    'login.microsoftonline.com', 'accounts.youtube.com',
+  ]);
 
   function isPlainObject(value) {
     return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -243,13 +251,40 @@
 
   function hasPreciseRestrictions(state) {
     return Boolean(state?.restrictions?.screenLock?.resource
+      || state?.restrictions?.screenLock?.classroomScope
       || state?.restrictions?.flightPath?.resources?.length);
   }
 
+  function classroomScopeError() {
+    return preciseRestrictionError('Invalid reviewed Classroom Focus scope', 'CLASSROOM_FOCUS_SCOPE_INVALID');
+  }
+
+  function normalizeClassroomFocusScope(value) {
+    const reservedHost = hostname => CLASSROOM_SCOPE_RESERVED_ROOTS.some(root =>
+      hostname === root || hostname.endsWith(`.${root}`));
+    if (!isPlainObject(value) || !hasExactKeys(value, ['schemaVersion', 'sourceRevision', 'allowedDomains', 'resources'])
+      || value.schemaVersion !== 1 || typeof value.sourceRevision !== 'string'
+      || !/^[a-f0-9]{64}$/.test(value.sourceRevision) || !Array.isArray(value.allowedDomains)
+      || value.allowedDomains.some(domain => !syntacticallyCanonicalHostname(domain)
+        || normalizeDomain(domain) !== domain || domain === 'google.com'
+        || reservedHost(domain))
+      || new Set(value.allowedDomains).size !== value.allowedDomains.length
+      || CLASSROOM_WORK_DOMAINS.some(domain => !value.allowedDomains.includes(domain))) throw classroomScopeError();
+    const resources = validateAllowedResourceList(value.resources);
+    if (!resources || resources.some(resource => resource.type === 'website'
+        || resource.type === 'section' && reservedHost(resource.hostname))
+      || value.allowedDomains.length + resources.length > 200
+      || new TextEncoder().encode(JSON.stringify(value)).length > 49152) throw classroomScopeError();
+    return { schemaVersion: 1, sourceRevision: value.sourceRevision,
+      allowedDomains: [...value.allowedDomains], resources };
+  }
+
   // Exactly SchoolPilot's classpilotCommandPayloadRequiresPreciseCapability:
-  // only a Waypoint's `resource` or a Flight Path's `resources` is precise. A
-  // Class tools lesson activity carries ordinary link `resources` instead.
+  // a Waypoint resource/reviewed Classroom scope or Flight Path resources
+  // require their state. A Class tools activity's link resources do not.
   function commandPayloadRequiresPreciseState(commandType, payload) {
+    if (commandType === 'lock-screen' && isPlainObject(payload)
+      && Object.prototype.hasOwnProperty.call(payload, 'classroomScope')) return true;
     const key = commandType === 'lock-screen' ? 'resource'
       : commandType === 'apply-flight-path' ? 'resources' : null;
     return key !== null && isPlainObject(payload)
@@ -948,6 +983,7 @@
 
     const hasResources = Object.prototype.hasOwnProperty.call(rawFlightPath, 'resources');
     const hasResource = Object.prototype.hasOwnProperty.call(rawScreenLock, 'resource');
+    const hasClassroomScope = Object.prototype.hasOwnProperty.call(rawScreenLock, 'classroomScope');
     const resources = hasResources ? validateAllowedResourceList(rawFlightPath.resources) : [];
     if (!resources || (hasResources && (rawFlightPath.active !== true || !resources.length)))
       throw preciseRestrictionError('Flight Path resources must be a nonempty, valid active list');
@@ -959,6 +995,15 @@
     const screenDomain = normalizeDomain(
       rawScreenLock.domain ?? rawScreenLock.lockedDomain ?? raw.lockedDomain ?? screenUrl
     );
+    let classroomScope = null;
+    if (hasClassroomScope) {
+      let target;
+      try { target = new URL(screenUrl); } catch { throw classroomScopeError(); }
+      if (rawScreenLock.active !== true || hasResource || target.protocol !== 'https:'
+        || target.hostname !== 'classroom.google.com' || screenDomain !== 'classroom.google.com'
+        || target.username || target.password || target.port || target.search || target.hash) throw classroomScopeError();
+      classroomScope = normalizeClassroomFocusScope(rawScreenLock.classroomScope);
+    }
     const flightDomains = normalizeDomainList(
       rawFlightPath.allowedDomains ?? rawFlightPath.domains ?? raw.allowedDomains,
       'Flight Path domains'
@@ -1006,6 +1051,7 @@
         url: safeScreenUrl,
         domain: screenDomain,
         ...(resource ? { resource: { ...resource } } : {}),
+        ...(classroomScope ? { classroomScope } : {}),
       },
       flightPath: {
         active: flightActive && flightDomains.length + resources.length > 0,
@@ -1126,6 +1172,16 @@
 
   function normalizePersistedClassroomState(rawState, nowValue = Date.now()) {
     let wireState = rawState;
+    if (rawState?.restrictions?.screenLock?.classroomScope && rawState.schemaVersion !== 4)
+      throw classroomScopeError();
+    if (rawState?.schemaVersion === 4) {
+      if (rawState.classroomScopePersistenceVersion !== 1 || !rawState.restrictions?.screenLock?.classroomScope)
+        throw classroomScopeError();
+      wireState = { ...rawState, schemaVersion: 1 };
+      delete wireState.classroomScopePersistenceVersion;
+      delete wireState.focusPersistenceVersion;
+      delete wireState.precisePersistenceVersion;
+    }
     if (rawState?.schemaVersion === 3) {
       if (rawState.focusPersistenceVersion !== 1 || rawState.restrictions?.focus?.active !== true)
         throw Object.assign(new Error('Unsupported persisted Focus'), { code: 'FOCUS_RESTRICTION_INVALID' });
@@ -1241,6 +1297,7 @@
           ? normalizeDomainList([classroom.screenLock.domain], 'screen lock domains')
           : [];
         const preciseWaypoint = classroom.screenLock?.active && classroom.screenLock.resource;
+        const classroomScope = classroom.screenLock?.active && classroom.screenLock.classroomScope;
         const preciseEntries = classroom.flightPath?.active ? classroom.flightPath.resources || [] : [];
         if (preciseEntries.length && !validateAllowedResourceList(preciseEntries))
           throw preciseRestrictionError('Invalid Flight Path DNR list');
@@ -1249,7 +1306,14 @@
           : classroom.flightPath?.active
             ? normalizeDomainList(classroom.flightPath.allowedDomains, 'Flight Path domains')
             : [];
-        if (preciseWaypoint) {
+        if (classroomScope) {
+          const scope = normalizeClassroomFocusScope(classroomScope);
+          rules.push({ id: DNR_RANGES.classroom[0], priority: 500, action: { type: 'block' },
+            condition: { resourceTypes: ['main_frame'], excludedRequestDomains: scope.allowedDomains } });
+          rules.push({ id: DNR_RANGES.classroom[0] + 1, priority: 500, action: { type: 'allow' },
+            condition: { resourceTypes: ['main_frame'], requestDomains: scope.allowedDomains } });
+          rules.push(...preciseDnrRules(scope.resources, 500));
+        } else if (preciseWaypoint) {
           rules.push({ id: DNR_RANGES.classroom[0], priority: 500, action: { type: 'block' },
             condition: { resourceTypes: ['main_frame'] } });
           rules.push(...preciseDnrRules([preciseWaypoint], 500));
@@ -1488,6 +1552,13 @@
     if (!state || typeof urlValue !== 'string') return false;
     const restrictions = state.restrictions ?? emptyRestrictions();
     if (restrictions.screenLock?.active) {
+      if (restrictions.screenLock.classroomScope) {
+        const scope = normalizeClassroomFocusScope(restrictions.screenLock.classroomScope);
+        const host = normalizeDomain(urlValue);
+        return Boolean(isHttpTab({ url: urlValue }) && host
+          && (scope.allowedDomains.some(domain => isHostWithinDomain(host, domain))
+            || scope.resources.some(resource => isUrlAllowedByRestrictionResource(urlValue, resource))));
+      }
       if (restrictions.screenLock.resource)
         return isUrlAllowedByRestrictionResource(urlValue, restrictions.screenLock.resource);
       if (!isHttpTab({ url: urlValue })) return false;
@@ -2181,6 +2252,7 @@
     restrictionResourceRuleCount,
     restrictionResourceRegexes,
     hasPreciseRestrictions,
+    normalizeClassroomFocusScope,
     commandPayloadRequiresPreciseState,
     restrictionLandingUrl,
     decideNavigation,
