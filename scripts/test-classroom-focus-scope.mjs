@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
@@ -7,7 +8,11 @@ import { join } from 'node:path';
 const source = readFileSync(process.env.CLASSPILOT_EXTENSION_PATH
   ? join(process.env.CLASSPILOT_EXTENSION_PATH, 'classroom-runtime-core.js')
   : new URL('../extension/classroom-runtime-core.js', import.meta.url), 'utf8');
-const fixture = JSON.parse(readFileSync(new URL('../server/__tests__/fixtures/classroom-focus-scope-cases.json', import.meta.url)));
+const fixtureBytes = readFileSync(new URL('../server/__tests__/fixtures/classroom-focus-scope-cases.json', import.meta.url));
+assert.equal(createHash('sha256').update(fixtureBytes).digest('hex'),
+  '4b04de889de92a89225d0e5b33bdf9d4f5b0ecce86c95cbe67d21b116bffa0f5',
+  'The shared Classroom Focus contract fixture bytes changed');
+const fixture = JSON.parse(fixtureBytes);
 const sandbox = vm.createContext({ URL, TextEncoder });
 vm.runInContext(source, sandbox);
 const runtime = sandbox.ClassPilotRuntimeCore;

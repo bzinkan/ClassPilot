@@ -1,2 +1,3 @@
 server/__tests__/fixtures/restriction-resource-matcher-cases.json -text
+server/__tests__/fixtures/classroom-focus-scope-cases.json -text
 extension/screenshot-delta-codec.js text eol=lf
