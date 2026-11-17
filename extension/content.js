@@ -2015,7 +2015,7 @@ function showMessageModal(data) {
           <h2>${title}</h2>
         </div>
         <div class="classpilot-modal-body">
-          <p>${escapeHtml(message)}</p>
+          <p class="classpilot-message-text"></p>
         </div>
         <div class="classpilot-modal-footer">
           <button class="classpilot-modal-button" id="classpilot-close-msg-btn">
@@ -2025,6 +2025,7 @@ function showMessageModal(data) {
       </div>
     </div>
   `;
+  renderPlainMessageLinks(modal.querySelector('.classpilot-message-text'), message);
   
   // Add styles
   addModalStyles();
@@ -2152,6 +2153,9 @@ function addModalStyles() {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       white-space: pre-wrap;
     }
+    .classpilot-modal-body .classpilot-message-text { overflow-wrap: anywhere; }
+    .classpilot-modal-body .classpilot-message-link { color: inherit; text-decoration: underline; }
+    .classpilot-modal-body .classpilot-message-link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
     
     .classpilot-modal-footer {
       padding: 16px 24px 24px;
@@ -2201,6 +2205,13 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+function renderPlainMessageLinks(container, text) {
+  if (!container) return;
+  if (typeof globalThis.ClassPilotMessageLinks?.renderMessageLinks === 'function') {
+    globalThis.ClassPilotMessageLinks.renderMessageLinks(container, text);
+  } else container.textContent = typeof text === 'string' ? text : '';
 }
 
 
@@ -3961,21 +3972,32 @@ function renderChatMessages() {
     return;
   }
 
-  const escapeHtml = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  container.innerHTML = chatMessages.map(msg => {
+  container.replaceChildren();
+  for (const msg of chatMessages) {
     const isStudent = msg.sender === 'student';
     const bubbleClass = isStudent ? 'classpilot-chat-bubble-student' : 'classpilot-chat-bubble-teacher';
-    const text = escapeHtml(msg.text);
-    const deliveryStatus = isStudent && ['Sending', 'Retrying', 'Waiting', 'Delivered', 'Failed'].includes(msg.status)
-      ? `<span class="classpilot-chat-delivery-status">${msg.status}</span>`
-      : '';
+    const bubble = document.createElement('div');
+    bubble.className = `classpilot-chat-bubble ${bubbleClass}`;
+    const text = document.createElement('span');
+    text.className = 'classpilot-message-text';
+    renderPlainMessageLinks(text, msg.text);
+    bubble.append(text);
     const sentAt = Number.isFinite(Number(msg.time)) && Number(msg.time) > 0
       ? new Date(Number(msg.time)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
       : '';
-    const sender = isStudent ? 'You' : escapeHtml(msg.fromName || 'Teacher');
-    const meta = `<span class="classpilot-chat-meta">${sender}${sentAt ? ` · ${sentAt}` : ''}</span>`;
-    return `<div class="classpilot-chat-bubble ${bubbleClass}">${text}${meta}${deliveryStatus}</div>`;
-  }).join('');
+    const sender = isStudent ? 'You' : String(msg.fromName || 'Teacher');
+    const meta = document.createElement('span');
+    meta.className = 'classpilot-chat-meta';
+    meta.textContent = `${sender}${sentAt ? ` · ${sentAt}` : ''}`;
+    bubble.append(meta);
+    if (isStudent && ['Sending', 'Retrying', 'Waiting', 'Delivered', 'Failed'].includes(msg.status)) {
+      const delivery = document.createElement('span');
+      delivery.className = 'classpilot-chat-delivery-status';
+      delivery.textContent = msg.status;
+      bubble.append(delivery);
+    }
+    container.append(bubble);
+  }
 
   container.scrollTop = container.scrollHeight;
 }
@@ -4259,6 +4281,10 @@ function addFabStyles() {
       line-height: 1.4;
       word-wrap: break-word;
     }
+
+    .classpilot-chat-bubble .classpilot-message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .classpilot-chat-bubble .classpilot-message-link { color: inherit; text-decoration: underline; overflow-wrap: anywhere; }
+    .classpilot-chat-bubble .classpilot-message-link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
     .classpilot-chat-bubble-student {
       align-self: flex-end;

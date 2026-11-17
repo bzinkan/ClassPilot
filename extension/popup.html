@@ -272,7 +272,11 @@
       font-size: 13px;
       color: #1e293b;
       line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
+    .message-content .classpilot-message-link { color: inherit; text-decoration: underline; }
+    .message-content .classpilot-message-link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
     
     .clear-messages {
       display: inline-block;
@@ -482,6 +486,7 @@
     </div>
   </div>
   
+  <script src="message-links.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

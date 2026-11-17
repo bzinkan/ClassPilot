@@ -7,7 +7,7 @@ import test from 'node:test';
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 
-const files = ['auth-gate-transport.js', 'page-lifecycle.js', 'auth-gate-bootstrap.js', 'content.js'];
+const files = ['auth-gate-transport.js', 'page-lifecycle.js', 'auth-gate-bootstrap.js', 'message-links.js', 'content.js'];
 const sources = Object.fromEntries(files.map(file => [file, readFileSync(process.env.CLASSPILOT_EXTENSION_PATH
   ? resolve(process.env.CLASSPILOT_EXTENSION_PATH, file) : new URL(`../extension/${file}`, import.meta.url), 'utf8')]));
 
@@ -34,7 +34,8 @@ test('real page scripts preserve same-version UI, retire callbacks, and rehydrat
           ? { phase: 'ready', authRequired: true, revision: 2, fastAuthGateEnabled: true, loginMethod: 'email_id' }
           : { phase: 'authenticated', authRequired: false, revision: 1, fastAuthGateEnabled: true } };
         if (message.type === 'get-student-message-context') return { success: true, studentMessageContext: context, fabBinding: 'fab-fixture' };
-        if (message.type === 'validate-student-message-context') return { success: true, current: true, fabBinding: 'fab-fixture' };
+        if (message.type === 'validate-student-message-context') return { success: true, current: true, fabBinding: 'fab-fixture',
+          activeContexts: [{ teachingSessionId: 'class-fixture' }] };
         if (message.type === 'get-student-session-ui-state') return { success: true, fabBinding: 'fab-fixture', stored: {
           fabContextV1: fabContext, fabChatContextV1: fabContext,
           fabStateV1: { messagingEnabled: true, handRaisingEnabled: true, revision: 1 }, fabChatMessages: [] } };
@@ -72,6 +73,24 @@ test('real page scripts preserve same-version UI, retire callbacks, and rehydrat
       listeners: lifecycleFixture.listeners.size, changes: lifecycleFixture.changes.size,
       signouts: lifecycleFixture.messages.filter(type => type === 'student-sign-out').length,
     })), { sameFab: true, samePoll: true, draft: 'draft chat text', listeners: 2, changes: 2, signouts: 0 });
+
+    // Recovery's dependency order installs the same real DOM enhancer. A
+    // missing optional enhancer leaves the message readable without retiring UI.
+    const recoveryLink = 'https://classroom.google.com/c/123?a=one&b=two#details';
+    const deliverRecoveryMessage = value => page.evaluate(text => {
+      for (const listener of lifecycleFixture.listeners) listener({ type: 'chat-reply',
+        studentMessageContext: lifecycleFixture.context,
+        data: { sessionId: 'class-fixture', message: text, fromName: 'Teacher', _msgId: text } }, {}, () => {});
+    }, value);
+    await deliverRecoveryMessage(`Recovered ${recoveryLink}`);
+    await page.waitForSelector(`#classpilot-fab-chat-messages a[href="${recoveryLink}"]`, { state: 'attached' });
+    assert.equal(await page.locator(`#classpilot-fab-chat-messages a[href="${recoveryLink}"]`).getAttribute('rel'), 'noopener noreferrer');
+    await page.evaluate(() => { delete globalThis.ClassPilotMessageLinks; });
+    const fallbackMessage = `Readable without enhancement ${recoveryLink}`;
+    await deliverRecoveryMessage(fallbackMessage);
+    await page.waitForFunction(expected => document.querySelector('#classpilot-fab-chat-messages .classpilot-chat-bubble:last-child .classpilot-message-text')?.textContent === expected, fallbackMessage);
+    assert.equal(await page.locator('#classpilot-fab-chat-messages .classpilot-chat-bubble').last().locator('a').count(), 0);
+    await page.addScriptTag({ content: sources['message-links.js'] });
 
     // Hold an old auth callback, retire both owners, then deliver it after disposal.
     await page.evaluate(() => { lifecycleFixture.holdAuth = true; ClassPilotPageLifecycle.reconcile(); });

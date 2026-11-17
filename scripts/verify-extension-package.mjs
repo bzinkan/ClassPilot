@@ -19,7 +19,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
-const expectedPreparedReleaseVersion = '3.0.7';
+const expectedPreparedReleaseVersion = '3.0.8';
 assert.equal(
   manifest.version,
   expectedPreparedReleaseVersion,
@@ -172,6 +172,7 @@ async function runPackagedSuite(script, environment) {
 async function runPackagedTests() {
   const environment = { ...process.env, CLASSPILOT_EXTENSION_PATH: unpackRoot };
   for (const script of [
+    'test-message-links.mjs',
     'test-extension-device-telemetry.mjs',
     'test-extension-device-telemetry-integration.mjs',
     'test-extension-screenshot-references.mjs',

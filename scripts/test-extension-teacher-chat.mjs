@@ -878,6 +878,82 @@ try {
 
   // Phase F: the popup inbox shows teacher text as text.
   outcomes.markupOnPage = await step(() => fixture(text => __chatFixture.reply('chat-r7', text), MARKUP));
+  // Message links stay plain-text decoration and use native user navigation.
+  const classroomLink = 'https://classroom.google.com/c/123?a=one&b=two#details';
+  const wwwLink = 'https://www.lesson.test/work';
+  const messageLinkText = `Open <${classroomLink}>,\nthen www.lesson.test/work. <img id="message-link-injection" src=x onerror=alert(1)>`;
+  const linkRequests = [];
+  context.on('request', request => {
+    if ([classroomLink.split('#')[0], wwwLink].includes(request.url())) linkRequests.push(request);
+  });
+  await context.route(`${origin}/message-links-csp`, route => route.fulfill({ status: 200,
+    contentType: 'text/html', headers: { 'Content-Security-Policy': "script-src 'none'; object-src 'none'; base-uri 'none'; style-src 'unsafe-inline'" }, body: lessonPage }));
+  await page.goto(`${origin}/message-links-csp`, { waitUntil: 'load' });
+  await page.waitForSelector('#classpilot-fab-message-box', { state: 'attached' });
+  await step(() => fixture(text => __chatFixture.reply('chat-link-query', text), messageLinkText));
+  const bubble = page.locator('#classpilot-fab-chat-messages .classpilot-chat-bubble').last();
+  assert.equal(await bubble.locator('a').count(), 2, 'the actual student bubble must turn HTTP(S) and www URLs into anchors');
+  assert.equal(await bubble.locator('.classpilot-message-text').textContent(), messageLinkText);
+  assert.equal(await page.locator('#message-link-injection').count(), 0);
+  assert.equal(await fixture(async () => ((await kv.get(MESSAGE_INBOX_STORAGE_KEY))[MESSAGE_INBOX_STORAGE_KEY] || [])
+    .find(item => item.id === 'chat-link-query')?.message), messageLinkText, 'link decoration must not rewrite persisted messages');
+  assert.equal(linkRequests.length, 0, 'rendering a message must not fetch or preview its links');
+  const openAllowedMessageLink = async (link, href, keyboard = false) => {
+    assert.equal(await link.getAttribute('target'), '_blank');
+    assert.equal(await link.getAttribute('rel'), 'noopener noreferrer');
+    assert.equal(await link.getAttribute('href'), href);
+    const created = context.waitForEvent('page');
+    if (keyboard) { await link.focus(); await link.press('Enter'); } else await link.click();
+    const opened = await created;
+    try {
+      await opened.waitForURL(href, { waitUntil: 'domcontentloaded' });
+      assert.equal(await opened.evaluate(() => window.opener), null);
+      assert.equal(await opened.evaluate(() => document.referrer), '');
+    } finally { await opened.close().catch(() => {}); }
+    await page.bringToFront();
+  };
+  await openAllowedMessageLink(bubble.locator('a').nth(0), classroomLink);
+  await openAllowedMessageLink(bubble.locator('a').nth(1), wwwLink, true);
+  const blockedGoogle = 'https://www.google.com/search?q=answers';
+  await fixture(() => __chatFixture.state({ flightPath: { active: true, name: 'Classroom messages',
+    allowedDomains: ['example.test', 'classroom.google.com', 'www.lesson.test'] } }));
+  assert.equal(await fixture(() => flightPathIsActive()), true);
+  assert.ok(await fixture(async () => (await chrome.declarativeNetRequest.getDynamicRules()).length) > 0);
+  await step(() => fixture(text => __chatFixture.reply('chat-link-blocked', text), `Teacher link ${blockedGoogle}`));
+  const openBlockedMessageLink = async (link, surface) => {
+    assert.equal(await link.getAttribute('href'), blockedGoogle);
+    const created = context.waitForEvent('page');
+    await link.click();
+    const opened = await created;
+    let last = '';
+    let stable = 0;
+    let result;
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      result = opened.isClosed() ? { closed: true } : {
+        closed: false, url: opened.url(), loaded: await opened.evaluate(() => Boolean(document.querySelector('h1')?.textContent === 'Lesson')).catch(() => false),
+      };
+      if (result.closed) break;
+      const current = JSON.stringify(result);
+      stable = current === last && result.url !== 'about:blank' ? stable + 1 : 0;
+      if (stable >= 4) break;
+      last = current;
+      await new Promise(done => setTimeout(done, 100));
+    }
+    assert.equal(result?.loaded === true, false, `${surface} must not bypass the existing Flight Path when opening Google Search: ${JSON.stringify(result)}`);
+    if (!opened.isClosed()) await opened.close().catch(() => {});
+    await page.bringToFront();
+    return { surface, ...result };
+  };
+  const blockedLinks = [];
+  blockedLinks.push(await openBlockedMessageLink(page.locator('#classpilot-fab-chat-messages .classpilot-chat-bubble').last().locator('a'), 'FAB'));
+  const announcementText = `Announcement <b id="announcement-link-injection">literal text</b> <${classroomLink}> ${blockedGoogle}`;
+  await step(() => fixture(text => __chatFixture.announce('announcement-link-blocked', text), announcementText));
+  assert.equal(await page.locator('#classpilot-message-modal .classpilot-message-text').textContent(), announcementText);
+  assert.equal(await page.locator('#announcement-link-injection').count(), 0);
+  await openAllowedMessageLink(page.locator(`#classpilot-message-modal a[href="${classroomLink}"]`), classroomLink);
+  blockedLinks.push(await openBlockedMessageLink(page.locator(`#classpilot-message-modal a[href="${blockedGoogle}"]`), 'announcement modal'));
+  await page.locator('#classpilot-close-msg-btn').click();
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup.html`, { waitUntil: 'load' });
   await popup.waitForSelector('#messages-container .message-item', { timeout: 15_000 });
@@ -890,7 +966,18 @@ try {
       texts: contents.map(node => node.textContent),
     };
   }, MARKUP);
+  assert.equal(await popup.locator(`.message-content a[href="${classroomLink}"]`).count(), 2, 'the extension inbox uses the same literal URL and query in both private messages and announcements');
+  assert.equal(await popup.locator('#message-link-injection').count(), 0);
+  await openAllowedMessageLink(popup.locator(`.message-content a[href="${classroomLink}"]`).first(), classroomLink);
+  await popup.bringToFront();
+  blockedLinks.push(await openBlockedMessageLink(popup.locator(`.message-content a[href="${blockedGoogle}"]`).first(), 'extension popup'));
   await popup.close();
+  await fixture(() => __chatFixture.state({}));
+  await page.goto(`${origin}/lesson`, { waitUntil: 'load' });
+  await page.waitForSelector('#classpilot-fab-message-box', { state: 'attached' });
+  await settle();
+  outcomes.messageLinks = { liveChat: true, announcementModal: true, popupInbox: true, mouseAndKeyboard: true,
+    literalHtml: true, noPreviewRequests: true, cspPage: true, exactClassroomQuery: classroomLink, blockedLinks };
 
   // Negotiated lifecycle: the server's generations, not arrival timestamps,
   // fence Redis/heartbeat retries, late closes and hard switch transitions.
