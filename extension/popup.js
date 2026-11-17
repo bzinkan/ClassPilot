@@ -383,13 +383,6 @@ async function popupStudentActionContextIsCurrent(context) {
   );
 }
 
-// Teacher-written text is shown as text, never parsed as markup.
-function popupTextHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (character) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[character]);
-}
-
 async function loadMessages() {
   const actionContext = await capturePopupStudentActionContext();
   if (!actionContext) return;
@@ -432,7 +425,7 @@ async function loadMessages() {
           <span class="message-title">💬 MESSAGE</span>
           <span class="message-time">${time}</span>
         </div>
-        <div class="message-content">${popupTextHtml(msg.message)}</div>
+        <div class="message-content"></div>
       </div>
     `;
   });
@@ -445,6 +438,12 @@ async function loadMessages() {
   `;
   
   container.innerHTML = html;
+  container.querySelectorAll('.message-content').forEach((node, index) => {
+    const text = sortedMessages[index].message;
+    if (typeof globalThis.ClassPilotMessageLinks?.renderMessageLinks === 'function') {
+      globalThis.ClassPilotMessageLinks.renderMessageLinks(node, text);
+    } else node.textContent = typeof text === 'string' ? text : '';
+  });
   
   // Add event listener to clear button
   document.getElementById('clear-messages-btn')?.addEventListener('click', clearMessages);

@@ -24565,7 +24565,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
 const PAGE_RECOVERY_FILES = Object.freeze([
   'auth-recovery-diagnostics.js', 'auth-gate-transport.js', 'page-lifecycle.js',
-  'auth-gate-bootstrap.js', 'content.js',
+  'auth-gate-bootstrap.js', 'message-links.js', 'content.js',
 ]);
 const LEGACY_GATE_UPDATE_KEY = 'classpilotLegacyGateUpdateV1';
 const PAGE_RECOVERY_VERSION = chrome.runtime.getManifest().version;

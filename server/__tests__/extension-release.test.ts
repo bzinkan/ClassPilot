@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("3.0.7");
+    expect(manifest.version).toBe("3.0.8");
     expect(manifest.minimum_chrome_version).toBe("120");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
@@ -249,7 +249,7 @@ describe("ClassPilot extension release package guards", () => {
         run_at: "document_start",
       }),
       expect.objectContaining({
-        js: ["auth-recovery-diagnostics.js", "auth-gate-transport.js", "page-lifecycle.js", "content.js"],
+        js: ["auth-recovery-diagnostics.js", "auth-gate-transport.js", "page-lifecycle.js", "message-links.js", "content.js"],
         run_at: "document_idle",
       }),
     ]));
