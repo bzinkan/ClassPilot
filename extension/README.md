@@ -525,9 +525,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-The current Chromebook candidate output is `dist/ClassPilot-v3.0.8.zip`, with
-its matching `.sha256` record. Follow the [3.0.8 candidate
-record](../docs/CLASS_PILOT_3_0_8_CANDIDATE.md), preserve every older versioned
+The current Chromebook candidate output is `dist/ClassPilot-v3.0.9.zip`, with
+its matching `.sha256` record. Follow the [3.0.9 candidate
+record](../docs/CLASS_PILOT_3_0_9_CANDIDATE.md), preserve every older versioned
 archive, and keep the exact verified ZIP unchanged. The 2.9.6 release paragraph
 below remains historical evidence.
 
