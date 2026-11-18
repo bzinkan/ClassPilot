@@ -23,6 +23,44 @@ const state = (classroomScope = scope(), screenLock = {}) => ({ schemaVersion: 1
   restrictions: { screenLock: { active: true, url: 'https://classroom.google.com/', classroomScope, ...screenLock },
     flightPath: { active: true, allowedDomains: ['retained.example'] } } });
 
+test('ordinary Classroom website Focus preserves Google work while blocking Search and unrelated sites', () => {
+  for (const domain of ['classroom.google.com', ' WWW.Classroom.Google.Com. ']) {
+    const normalized = runtime.normalizeClassroomState({ schemaVersion: 1, revision: 1,
+      teachingSessionId: 'ordinary-classroom', hardExpiresAt: Date.now() + 60_000,
+      restrictions: { screenLock: { active: true, url: 'https://classroom.google.com/c/course', domain } } });
+    for (const url of ['https://docs.google.com/document/d/student-copy/edit', 'https://drive.google.com/student-work',
+      'https://slides.google.com/student-work', 'https://sheets.google.com/student-work',
+      'https://forms.google.com/student-work', 'https://forms.gle/student-form']) {
+      assert.equal(runtime.decideNavigation(url, { classroomState: normalized }).allowed, true, url);
+    }
+    for (const url of ['https://www.google.com/search?q=answers', 'https://images.google.com/',
+      'https://mail.google.com/', 'https://sites.google.com/', 'https://youtube.com/',
+      'https://docs.google.com.evil.example/', 'https://unrelated.example/']) {
+      assert.equal(runtime.decideNavigation(url, { classroomState: normalized }).allowed, false, url);
+    }
+    const tabs = [{ id: 1, active: true, url: 'https://classroom.google.com/c/course' },
+      { id: 2, url: 'https://docs.google.com/document/d/student-copy/edit' },
+      { id: 3, url: 'https://drive.google.com/student-work' }, { id: 4, url: 'https://google.com/search?q=answers' }];
+    const plan = runtime.planClassroomTabReconciliation(normalized, tabs, { foregroundTabId: 1 });
+    assert.deepEqual(plain(plan.removeTabIds), [4]);
+    assert.deepEqual(plain(plan.updates), []);
+  }
+});
+
+test('Classroom companions do not widen sections, resources, subdomain Focus or another website', () => {
+  const section = { type: 'section', hostname: 'classroom.google.com', includeSubdomains: false, pathPrefix: '/c/course' };
+  for (const screenLock of [
+    { active: true, url: 'https://classroom.google.com/c/course', domain: 'classroom.google.com', resource: section },
+    { active: true, url: 'https://sub.classroom.google.com/', domain: 'sub.classroom.google.com' },
+    { active: true, url: 'https://another.example/', domain: 'another.example' },
+  ]) {
+    const normalized = runtime.normalizeClassroomState({ schemaVersion: 1, revision: 1,
+      teachingSessionId: 'narrow-classroom', hardExpiresAt: Date.now() + 60_000, restrictions: { screenLock } });
+    assert.equal(runtime.decideNavigation('https://docs.google.com/document/d/student-copy/edit', { classroomState: normalized }).allowed, false);
+    assert.equal(runtime.decideNavigation('https://forms.google.com/student-form', { classroomState: normalized }).allowed, false);
+  }
+});
+
 test('Classroom Focus permits reviewed work/material scopes and rejects other destinations', () => {
   const normalized = runtime.normalizeClassroomState(state());
   for (const entry of fixture.match) {

@@ -48,8 +48,11 @@ try {
     activateAuthenticatedContext('command-ack-diagnostics');
     const auth = captureAuthenticatedContext('ACK diagnostic fixture');
     adoptLicenseState(true, 'active', auth);
-    schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
-    schoolSettingsScope = schoolPolicyScopeForAuthContext(auth); schoolSettingsFetchedAt = Date.now();
+    // Install callbacks can reload policy after workerWakeSettled. Seed the
+    // same exact-scoped cache the real initializer reads, not only memory.
+    await kv.set({ [SCHOOL_SETTINGS_CACHE_KEY]: { enableTrackingHours: false, afterHoursMode: 'off' },
+      [SCHOOL_SETTINGS_SCOPE_KEY]: schoolPolicyScopeForAuthContext(auth), [SCHOOL_SETTINGS_FETCHED_AT_KEY]: Date.now() });
+    await loadCachedSchoolSettings({ authContext: auth });
     trackingState = TRACKING_STATES.ACTIVE;
     adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: [
       'scopedAuthorityChecksV1', 'classroomStateV1', 'commandAckReceiptV1', 'exactBindingAckV2',
@@ -111,6 +114,11 @@ try {
         ackId: ack.ackId, commandId: ack.commandId, accepted: true, disposition: 'applied', retryable: false,
       })) } : {}), { status: acceptReceipts ? 200 : 503, headers: { 'content-type': 'application/json' } });
     };
+    // onInstalled schedules this real callback independently of worker wake.
+    // A late callback must retain the fixture's policy and WS retry transport.
+    await initializeAdaptiveTracking('install');
+    const lateInstallPreservedTracking = [TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(trackingState);
+    const lateInstallPreservedWebSocket = wsConnected;
     await flushCommandAckOutbox({ forceHttp: true });
     const afterRetry = (await durableLocalKv.get(COMMAND_ACK_OUTBOX_KEY))[COMMAND_ACK_OUTBOX_KEY];
     const wsRetry = project(sent.filter(ack => ack.ackState === 'failed'));
@@ -118,6 +126,7 @@ try {
     await flushCommandAckOutbox({ forceHttp: true });
     const final = (await durableLocalKv.get(COMMAND_ACK_OUTBOX_KEY))[COMMAND_ACK_OUTBOX_KEY];
     return { expected, immediate, stored: project(stored), wsRetry, afterRetry: project(afterRetry),
+      lateInstallPreservedTracking, lateInstallPreservedWebSocket,
       httpAttempts: httpAttempts.map(body => project(body.acks)), remaining: final?.length || 0,
       privateDiagnosticLeaked: JSON.stringify({ stored, sent, httpAttempts }).includes(secret),
       exactBindingRetained: afterRetry.every(ack => ack.bindingVersion === 2 && ack.schoolId === auth.schoolId
@@ -133,6 +142,8 @@ try {
     assert.deepEqual(rows, report.expected, `${stage} must retain safe precise diagnostics without arbitrary error text`);
   }
   assert.equal(report.remaining, 0, 'the matching server receipt must drain the durable outbox');
+  assert.equal(report.lateInstallPreservedTracking, true, 'late install initialization must retain the scoped monitoring policy');
+  assert.equal(report.lateInstallPreservedWebSocket, true, 'late install initialization must retain the WS retry fixture');
   assert.equal(report.privateDiagnosticLeaked, false, 'unknown diagnostic content must not enter durable storage or retry transport');
   assert.equal(report.exactBindingRetained, true, 'diagnostic preservation must not weaken ACK binding');
   console.log('PASS command ACK diagnostics: precise safe reasons survive storage, WebSocket and HTTP retries; unknown text is redacted.');

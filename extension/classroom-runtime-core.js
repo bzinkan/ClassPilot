@@ -1279,6 +1279,17 @@
     return Boolean(range && ruleId >= range[0] && ruleId < range[1]);
   }
 
+  function screenLockWebsiteDomains(screenLock) {
+    const domains = normalizeDomainList([screenLock.domain || screenLock.url], 'screen lock domains');
+    // Classroom website Focus has the same Google work companions as an
+    // ordinary Flight Path. Precise resources and reviewed scopes own their
+    // separate policy and must never acquire these website permissions.
+    return domains[0] === 'classroom.google.com'
+      && !Object.prototype.hasOwnProperty.call(screenLock, 'resource')
+      && !Object.prototype.hasOwnProperty.call(screenLock, 'classroomScope')
+      ? [...CLASSROOM_WORK_DOMAINS] : domains;
+  }
+
   function buildDnrRules(input, rangeNames = Object.keys(DNR_RANGES), nowValue = Date.now()) {
     const nowMs = timestampMs(nowValue) ?? Date.now();
     const ranges = new Set(rangeNames);
@@ -1294,7 +1305,7 @@
         // independently configured Flight Path. It wins enforcement while
         // active; removing only the screen lock reveals the retained path.
         const screenLockDomains = classroom.screenLock?.active
-          ? normalizeDomainList([classroom.screenLock.domain], 'screen lock domains')
+          ? screenLockWebsiteDomains(classroom.screenLock)
           : [];
         const preciseWaypoint = classroom.screenLock?.active && classroom.screenLock.resource;
         const classroomScope = classroom.screenLock?.active && classroom.screenLock.classroomScope;
@@ -1562,10 +1573,8 @@
       if (restrictions.screenLock.resource)
         return isUrlAllowedByRestrictionResource(urlValue, restrictions.screenLock.resource);
       if (!isHttpTab({ url: urlValue })) return false;
-      return isHostWithinDomain(
-        normalizeDomain(urlValue),
-        normalizeDomain(restrictions.screenLock.domain || restrictions.screenLock.url),
-      );
+      return screenLockWebsiteDomains(restrictions.screenLock).some(domain =>
+        isHostWithinDomain(normalizeDomain(urlValue), domain));
     }
     const host = normalizeDomain(urlValue);
     return Boolean(host && restrictions.flightPath?.active
