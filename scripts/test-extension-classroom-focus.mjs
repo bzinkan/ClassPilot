@@ -21,9 +21,15 @@ try {
     args: ['--headless=new', '--enable-automation', '--no-proxy-server',
       '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1',
       `--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`] });
+  // Use actual documents for native page interaction without requesting Google
+  // or depending on the deliberately unavailable public DNS transport.
+  await context.route('https://classroom.google.com/c/current', route => route.fulfill({ status: 200,
+    contentType: 'text/html', body: '<!doctype html><title>Synthetic Classroom work</title><a id="assigned-doc" target="_blank" href="https://docs.google.com/document/d/SyntheticStudentCopy012345678901/edit">Open assigned Doc</a>' }));
+  await context.route('https://docs.google.com/document/d/SyntheticStudentCopy012345678901/edit', route => route.fulfill({ status: 200,
+    contentType: 'text/html', body: '<!doctype html><title>Assigned Doc</title><p>Assigned document loaded</p>' }));
   const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 15_000 });
   await waitForExtensionWorkerDeclarations(worker);
-  const result = await worker.evaluate(async fixture => {
+  const acceptance = worker.evaluate(async fixture => {
     const require = (condition, message) => { if (!condition) throw new Error(`[regression:classroom-focus] ${message}`); };
     const until = async (predicate, message) => {
       const deadline = Date.now() + 20_000;
@@ -102,6 +108,12 @@ try {
     negotiate(['classroomStateV1', 'screenOnlyUnlockV1']);
     const ordinary = () => ({ screenLock: { active: true, url: 'https://classroom.google.com/c/course', domain: 'classroom.google.com' },
       flightPath: { active: true, allowedDomains: ['underlying.example'] }, attentionMode: { active: true }, tabLimit: 2 });
+    // Prepare an existing real Classroom page before applying Focus. Creating
+    // a new placeholder under active Focus legitimately invokes its blank-tab
+    // guard on older Chrome, which is not the CURRENT_URL scenario.
+    globalThis.ordinaryFixturePhase = 'prepare-page';
+    await until(() => globalThis.ordinaryFixturePhase === 'page-ready', 'real Classroom page was not prepared');
+    await until(() => pendingCreatedTabPolicies.size === 0, 'Classroom source creation policy did not settle');
     require((await install(snapshot(ordinary()))).outcome === 'applied', 'ordinary Classroom website Focus required a capability gate');
     const ordinaryAllowed = [...workHosts.map(host => `https://${host}/student-work`),
       'https://docs.google.com/document/d/SyntheticStudentCopy012345678901/edit'];
@@ -129,13 +141,32 @@ try {
     require((await applyClassroomState(ordinaryRestored, { authContext: auth, trustedPersistedRestrictionSso: true, force: true })).outcome === 'applied',
       'ordinary Focus did not restore');
     require(matcher(ordinaryAllowed[1]) && await nativeAction(ordinaryAllowed[1]) !== 'block', 'ordinary restore lost Google work');
-    const currentTab = await chrome.tabs.create({ active: true, url: 'https://classroom.google.com/c/current' });
+    const currentTab = (await chrome.tabs.query({})).find(tab => tab.url === 'https://classroom.google.com/c/current');
+    require(currentTab, 'existing Classroom source tab was lost');
+    await chrome.windows.update(currentTab.windowId, { focused: true });
+    await chrome.tabs.update(currentTab.id, { active: true });
     await until(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))
-      .some(tab => tab.id === currentTab.id && isHttpUrl(tab.url)), 'current Classroom tab did not settle');
+      .some(tab => tab.id === currentTab.id && tab.status === 'complete' && isHttpUrl(tab.url)), 'current Classroom tab did not settle');
     const marker = ordinary(); marker.screenLock = { active: true, url: 'CURRENT_URL' };
-    require((await install(await resolveCurrentUrlMarker(snapshot(marker)))).outcome === 'applied', 'current-page Classroom Focus did not apply');
+    const resolvedMarker = await resolveCurrentUrlMarker(snapshot(marker));
+    require(resolvedMarker.restrictions.screenLock.domain === 'classroom.google.com', 'current-page fixture did not resolve the real Classroom tab');
+    require((await install(resolvedMarker)).outcome === 'applied', 'current-page Classroom Focus did not apply');
     require(matcher(ordinaryAllowed[1]) && await nativeAction(ordinaryAllowed[1]) !== 'block', 'current-page Classroom Focus lost Google work');
-    await chrome.tabs.remove(currentTab.id);
+    // A trusted page click opens actual work under active Focus. Keep the
+    // independent cap at two, with just Classroom open before the click.
+    const clickState = snapshot({ ...ordinary(), attentionMode: { active: false } });
+    await install(clickState);
+    // This harness suppresses general post-ACK effects. Deliver the real UI
+    // message so any bootstrap Attention overlay follows the adopted state.
+    await broadcastToAllTabsForAuth('attention-mode', { active: false, message: '' }, auth, envelope(clickState.revision));
+    require(screenLocked && !attentionModeActive && currentMaxTabs === 2, 'assignment click fixture has conflicting controls');
+    globalThis.ordinaryFixturePhase = 'open-doc';
+    await until(() => globalThis.ordinaryFixturePhase === 'doc-opened', 'the real assigned Doc did not open');
+    await until(() => pendingCreatedTabPolicies.size === 0, 'assigned work creation policy did not settle');
+    const assignedDoc = (await chrome.tabs.query({})).find(tab => tab.url === ordinaryAllowed.at(-1));
+    require(assignedDoc && screenLocked && currentMaxTabs === 2 && matcher(assignedDoc.url)
+      && await nativeAction(assignedDoc.url) !== 'block', 'assigned work tab did not survive active Focus');
+    await chrome.tabs.remove(assignedDoc.id);
     globalBlockedDomains = ['sheets.google.com']; await composeDynamicRules(['school']);
     require((await install(snapshot({ ...ordinary(), blockList: { active: true, blockedDomains: ['forms.google.com'] } }))).outcome === 'applied',
       'ordinary blocked work fixture did not apply');
@@ -263,11 +294,37 @@ try {
       'student handoff retained the prior reviewed scope');
     require((await chrome.declarativeNetRequest.getDynamicRules()).filter(rule => RuntimeCore.isRuleInRange(rule.id, 'classroom')).length === 0,
       'student handoff retained the prior scope native rules');
-    return { ordinaryAllowedChecks: ordinaryAllowed.length, ordinaryDeniedChecks: ordinaryDenied.length,
+    return { ordinaryAllowedChecks: ordinaryAllowed.length, ordinaryDeniedChecks: ordinaryDenied.length, actualAssignedDocTab: true,
       ordinaryRestoreAndCurrentPage: true, ordinaryIndependentControls: true, allowedChecks: allowed.length, deniedChecks: denied.length, priorWorkPreserved: true,
       wholeWebsiteReviewHonored: true, malformedAndCapabilityRejections: true, nativeFailureAtomic: true,
       storageSchema: persisted.schemaVersion, ownedRestore: true, stopPreservesFlightPath: true, studentHandoffClearsScope: true };
   }, fixture);
+  const interactWithRealPages = async () => {
+    const phase = async expected => {
+      const deadline = Date.now() + 30_000;
+      while ((await worker.evaluate(() => globalThis.ordinaryFixturePhase)) !== expected) {
+        assert.ok(Date.now() < deadline, `Fixture did not reach ${expected}`);
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    };
+    await phase('prepare-page');
+    const classroomPage = await context.newPage();
+    await classroomPage.goto('https://classroom.google.com/c/current', { waitUntil: 'load' });
+    for (const page of context.pages()) if (page !== classroomPage && page.url() === 'about:blank') await page.close();
+    await classroomPage.bringToFront();
+    await worker.evaluate(() => { globalThis.ordinaryFixturePhase = 'page-ready'; });
+    await phase('open-doc');
+    await classroomPage.waitForFunction(() => !document.querySelector('#classpilot-attention-overlay'));
+    const [docPage] = await Promise.all([
+      context.waitForEvent('page', { timeout: 20_000 }),
+      classroomPage.locator('#assigned-doc').click({ timeout: 15_000 }),
+    ]);
+    await docPage.waitForURL('https://docs.google.com/document/d/SyntheticStudentCopy012345678901/edit');
+    await docPage.waitForLoadState('load');
+    assert.equal(await docPage.locator('p').textContent(), 'Assigned document loaded');
+    await worker.evaluate(() => { globalThis.ordinaryFixturePhase = 'doc-opened'; });
+  };
+  const [result] = await Promise.all([acceptance, interactWithRealPages()]);
   console.log(JSON.stringify({ browser: context.browser().version(), classroomFocusAcceptance: result }, null, 2));
 } finally {
   if (context) await context.close();
