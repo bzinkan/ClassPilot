@@ -2,7 +2,15 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared Chromebook candidate is **3.0.8**. HTTP(S) and www. links in student
+The prepared Chromebook candidate is **3.0.9**. Entire-website Focus on
+`classroom.google.com` includes Google Docs, Drive, Sheets, Slides, Forms and
+`forms.gle`, matching the ordinary Classroom Flight Path work-app bundle.
+Google Search and unrelated sites stay outside that bundle. Specific-resource
+and Section Focus retain their reviewed boundaries. This ordinary website
+behavior requires no Classroom assignment import or Google connector setup.
+See the [3.0.9 candidate record](../docs/CLASS_PILOT_3_0_9_CANDIDATE.md).
+
+It retains 3.0.8: HTTP(S) and www. links in student
 chat, announcement modals and the popup inbox open in a new tab when activated.
 Messages remain plain text; links do not change Focus, Flight Path or school
 permissions. See the [3.0.8 candidate record](../docs/CLASS_PILOT_3_0_8_CANDIDATE.md).
@@ -27,9 +35,10 @@ changed administrator limit can still reduce existing tabs. Same-value school
 settings refresh, reconnect and worker restore preserve approved work. Tab
 reconciliation rechecks exact current tabs before destructive mutations and
 does not create a duplicate landing when approved work already exists.
-SchoolPilot separately expands an ordinary Classroom website entry into its
-reviewed Google work-app domains; the extension enforces the delivered snapshot
-without adding domains locally. See the [3.0.6 candidate
+For Flight Paths, SchoolPilot expands an ordinary Classroom website entry into
+its fixed Google work-app domains; the extension enforces that delivered
+snapshot. Version 3.0.9 also applies the same fixed bundle to ordinary Classroom
+website Focus. See the [3.0.6 candidate
 record](../docs/CLASS_PILOT_3_0_6_CANDIDATE.md).
 
 It retains 3.0.5, which adds negotiated routine

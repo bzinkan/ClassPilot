@@ -88,10 +88,6 @@ try {
       observeExactStudentControlRevision(delivery, auth, 'synthetic Classroom Focus state');
       return applyClassroomState(state, { authContext: auth, authorityEnvelope: delivery });
     };
-    const active = snapshot(base());
-    require((await install(active)).outcome === 'applied', 'valid reviewed scope was not applied');
-    require(currentClassroomState.restrictions.screenLock.classroomScope?.sourceRevision === scope.sourceRevision,
-      'normalization dropped the reviewed Classroom scope');
     const matcher = url => RuntimeCore.decideNavigation(url, { classroomState: runtimeClassroomStateForRules(),
       globalBlockedDomains: [...globalBlockedDomains] }).allowed;
     const nativeAction = async url => {
@@ -101,6 +97,60 @@ try {
       matching.sort((left, right) => right.priority - left.priority || (left.action.type === 'allow' ? -1 : 1));
       return matching[0]?.action.type || 'none';
     };
+    // Ordinary website Focus requires no Classroom source review or precise
+    // capability. Exercise the installed worker and Chrome's real DNR engine.
+    negotiate(['classroomStateV1', 'screenOnlyUnlockV1']);
+    const ordinary = () => ({ screenLock: { active: true, url: 'https://classroom.google.com/c/course', domain: 'classroom.google.com' },
+      flightPath: { active: true, allowedDomains: ['underlying.example'] }, attentionMode: { active: true }, tabLimit: 2 });
+    require((await install(snapshot(ordinary()))).outcome === 'applied', 'ordinary Classroom website Focus required a capability gate');
+    const ordinaryAllowed = [...workHosts.map(host => `https://${host}/student-work`),
+      'https://docs.google.com/document/d/SyntheticStudentCopy012345678901/edit'];
+    const ordinaryDenied = ['https://google.com/search?q=answers', 'https://www.google.com/search?q=answers',
+      'https://images.google.com/', 'https://mail.google.com/', 'https://sites.google.com/', 'https://youtube.com/',
+      'https://unrelated.example/', 'https://classroom.google.com.evil.example/', 'https://docs.google.com.evil.example/'];
+    for (const url of ordinaryAllowed) {
+      require(await nativeAction(url) !== 'block', `ordinary native Focus denied Google work: ${url}`);
+      require(matcher(url), `ordinary Focus matcher denied Google work: ${url}`);
+    }
+    for (const url of ordinaryDenied) {
+      require(await nativeAction(url) === 'block' && !matcher(url), `ordinary Focus admitted unrelated work: ${url}`);
+    }
+    require(!createdTabRemovalDecisionStillApplies({ policySource: 'screen_lock' },
+      { id: 123, url: 'https://docs.google.com/document/d/student-copy/edit' }),
+    'ordinary Focus removed a new Google work tab');
+    const ordinaryTabs = [{ id: 1, active: true, url: 'https://classroom.google.com/c/course' },
+      { id: 2, url: 'https://docs.google.com/document/d/student-copy/edit' },
+      { id: 3, url: 'https://drive.google.com/student-work' }, { id: 4, url: 'https://google.com/search?q=answers' }];
+    const ordinaryPlan = RuntimeCore.planClassroomTabReconciliation(currentClassroomState, ordinaryTabs,
+      { foregroundTabId: 1, maxTabs: 1, existingTabLimitMode: 'preserve-existing' });
+    require(JSON.stringify(ordinaryPlan.removeTabIds) === '[4]' && ordinaryPlan.updates.length === 0,
+      'ordinary Focus closed or replaced existing Google work');
+    const ordinaryRestored = RuntimeCore.normalizePersistedClassroomState(persistedClassroomStateSnapshot(currentClassroomState));
+    require((await applyClassroomState(ordinaryRestored, { authContext: auth, trustedPersistedRestrictionSso: true, force: true })).outcome === 'applied',
+      'ordinary Focus did not restore');
+    require(matcher(ordinaryAllowed[1]) && await nativeAction(ordinaryAllowed[1]) !== 'block', 'ordinary restore lost Google work');
+    const currentTab = await chrome.tabs.create({ active: true, url: 'https://classroom.google.com/c/current' });
+    await until(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))
+      .some(tab => tab.id === currentTab.id && isHttpUrl(tab.url)), 'current Classroom tab did not settle');
+    const marker = ordinary(); marker.screenLock = { active: true, url: 'CURRENT_URL' };
+    require((await install(await resolveCurrentUrlMarker(snapshot(marker)))).outcome === 'applied', 'current-page Classroom Focus did not apply');
+    require(matcher(ordinaryAllowed[1]) && await nativeAction(ordinaryAllowed[1]) !== 'block', 'current-page Classroom Focus lost Google work');
+    await chrome.tabs.remove(currentTab.id);
+    globalBlockedDomains = ['sheets.google.com']; await composeDynamicRules(['school']);
+    require((await install(snapshot({ ...ordinary(), blockList: { active: true, blockedDomains: ['forms.google.com'] } }))).outcome === 'applied',
+      'ordinary blocked work fixture did not apply');
+    for (const url of ['https://sheets.google.com/student-work', 'https://forms.google.com/student-work'])
+      require(!matcher(url) && await nativeAction(url) === 'block', 'ordinary companions overrode school or teacher blocking');
+    require((await install(snapshot({ ...ordinary(), screenLock: { active: false } }))).outcome === 'applied', 'ordinary Stop Focus did not apply');
+    require(flightPathIsActive() && matcher('https://underlying.example/work') && !matcher(ordinaryAllowed[1])
+      && await nativeAction(ordinaryAllowed[1]) === 'block' && attentionModeActive && currentMaxTabs === 2,
+    'ordinary Stop Focus lost independent controls or retained companion exceptions');
+    globalBlockedDomains = ['school-blocked.assigned.example']; await composeDynamicRules(['school']);
+    negotiate(capabilities);
+    const active = snapshot(base());
+    require((await install(active)).outcome === 'applied', 'valid reviewed scope was not applied');
+    require(currentClassroomState.restrictions.screenLock.classroomScope?.sourceRevision === scope.sourceRevision,
+      'normalization dropped the reviewed Classroom scope');
     const allowed = [...workHosts.map(host => `https://${host}/student-work`),
       'https://assigned.example/launch?assignment=one&student=synthetic',
       'https://assigned.example/different-page?reviewed=whole-website', video.canonicalUrl];
@@ -213,7 +263,8 @@ try {
       'student handoff retained the prior reviewed scope');
     require((await chrome.declarativeNetRequest.getDynamicRules()).filter(rule => RuntimeCore.isRuleInRange(rule.id, 'classroom')).length === 0,
       'student handoff retained the prior scope native rules');
-    return { allowedChecks: allowed.length, deniedChecks: denied.length, priorWorkPreserved: true,
+    return { ordinaryAllowedChecks: ordinaryAllowed.length, ordinaryDeniedChecks: ordinaryDenied.length,
+      ordinaryRestoreAndCurrentPage: true, ordinaryIndependentControls: true, allowedChecks: allowed.length, deniedChecks: denied.length, priorWorkPreserved: true,
       wholeWebsiteReviewHonored: true, malformedAndCapabilityRejections: true, nativeFailureAtomic: true,
       storageSchema: persisted.schemaVersion, ownedRestore: true, stopPreservesFlightPath: true, studentHandoffClearsScope: true };
   }, fixture);
