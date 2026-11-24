@@ -979,6 +979,28 @@ try {
   outcomes.messageLinks = { liveChat: true, announcementModal: true, popupInbox: true, mouseAndKeyboard: true,
     literalHtml: true, noPreviewRequests: true, cspPage: true, exactClassroomQuery: classroomLink, blockedLinks };
 
+  const originalViewport = page.viewportSize();
+  const shortViewport = { width: 680, height: 400 };
+  await page.setViewportSize(shortViewport);
+  const longAnnouncement = Array.from({ length: 24 }, (_, index) =>
+    `Step ${index + 1}: Check the instructions before moving on.`).join('\n');
+  await step(() => fixture(text => __chatFixture.announce('announcement-short-viewport', text), longAnnouncement));
+  const announcement = page.locator('#classpilot-message-modal');
+  const announcementBody = announcement.locator('.classpilot-modal-body');
+  const closeAnnouncement = announcement.getByRole('button', { name: 'Close' });
+  const closeBounds = await closeAnnouncement.boundingBox();
+  assert.ok(closeBounds && closeBounds.y >= 0 && closeBounds.y + closeBounds.height <= shortViewport.height,
+    `Close must be in the viewport before scrolling a long announcement: ${JSON.stringify(closeBounds)}`);
+  assert.equal(await announcementBody.locator('.classpilot-message-text').textContent(), longAnnouncement);
+  await announcementBody.press('End');
+  await page.waitForFunction(() => {
+    const body = document.querySelector('#classpilot-message-modal .classpilot-modal-body');
+    return body.scrollTop > 0 && body.scrollTop + body.clientHeight >= body.scrollHeight - 1;
+  }, undefined, { timeout: 5_000 });
+  await closeAnnouncement.click();
+  await announcement.waitFor({ state: 'detached' });
+  await page.setViewportSize(originalViewport);
+
   // Negotiated lifecycle: the server's generations, not arrival timestamps,
   // fence Redis/heartbeat retries, late closes and hard switch transitions.
   await fixture(() => __chatFixture.enableLifecycle());

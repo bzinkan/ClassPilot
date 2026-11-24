@@ -2014,11 +2014,11 @@ function showMessageModal(data) {
           <div class="classpilot-modal-icon">${icon}</div>
           <h2>${title}</h2>
         </div>
-        <div class="classpilot-modal-body">
+        <div class="classpilot-modal-body" tabindex="0">
           <p class="classpilot-message-text"></p>
         </div>
         <div class="classpilot-modal-footer">
-          <button class="classpilot-modal-button" id="classpilot-close-msg-btn">
+          <button type="button" class="classpilot-modal-button" id="classpilot-close-msg-btn">
             Close
           </button>
         </div>
@@ -2101,6 +2101,21 @@ function addModalStyles() {
     
     .classpilot-modal-content.classpilot-message {
       border-top: 6px solid #3b82f6;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      max-height: calc(100% - 24px);
+      overflow-y: auto;
+    }
+
+    .classpilot-message .classpilot-modal-header,
+    .classpilot-message .classpilot-modal-footer {
+      flex-shrink: 0;
+    }
+
+    .classpilot-message .classpilot-modal-body {
+      min-height: 0;
+      overflow-y: auto;
     }
     
     .classpilot-modal-header {
