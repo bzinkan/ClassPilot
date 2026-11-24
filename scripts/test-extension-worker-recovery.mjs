@@ -643,10 +643,11 @@ test('a stalled revision read retains its owner while an independently held rost
 
 test('completed stale roster publication never releases ready before current policy is durably reconciled',async()=>{
   const h=durablePublicationHarness({kind:'roster_context',failure:'pending'}),c=h.context;
-  await h.settle();assert.equal(c.authGateRosterContextReady,false);
+  await h.settleUntil(()=>h.failures===1,'the original roster context must reach the held native write');
+  assert.equal(c.authGateRosterContextReady,false);
   c.managedAuthGatePolicyGeneration++;
   c.CONFIG.enrollmentKey='replacement-fixture-enrollment';
-  h.pending.resolve();await h.settle();await c.authStateRestorePromise;
+  h.pending.resolve();await c.authStateRestorePromise;
   assert.equal(h.writes.filter(key=>key==='roster-context').length,2);
   assert.equal(h.state['roster-context'].fingerprint,await c.authGateRosterContextFingerprintForCurrentMaterial());
   assert.equal(c.authGateRosterContextFingerprint,h.state['roster-context'].fingerprint);
