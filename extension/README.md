@@ -2,7 +2,11 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared Chromebook candidate is **3.0.9**. Entire-website Focus on
+The prepared Chromebook candidate is **3.1.0**. Long class announcements keep
+the student’s **Close** button visible on shorter viewports while the message
+body scrolls. See the [3.1.0 candidate record](../docs/CLASS_PILOT_3_1_0_CANDIDATE.md).
+
+The release retains 3.0.9’s entire-website Focus on
 `classroom.google.com` includes Google Docs, Drive, Sheets, Slides, Forms and
 `forms.gle`, matching the ordinary Classroom Flight Path work-app bundle.
 Google Search and unrelated sites stay outside that bundle. Specific-resource
@@ -525,9 +529,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-The current Chromebook candidate output is `dist/ClassPilot-v3.0.9.zip`, with
-its matching `.sha256` record. Follow the [3.0.9 candidate
-record](../docs/CLASS_PILOT_3_0_9_CANDIDATE.md), preserve every older versioned
+The current Chromebook candidate output is `dist/ClassPilot-v3.1.0.zip`, with
+its matching `.sha256` record. Follow the [3.1.0 candidate
+record](../docs/CLASS_PILOT_3_1_0_CANDIDATE.md), preserve every older versioned
 archive, and keep the exact verified ZIP unchanged. The 2.9.6 release paragraph
 below remains historical evidence.
 
