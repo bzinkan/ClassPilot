@@ -1393,6 +1393,21 @@ async function main() {
         setupExpiresAt: Date.now() + 60_000,
         expiresAt: Date.now() + 10 * 60_000,
       };
+      const liveManifestBeforeReplacement = chrome.runtime.getManifest;
+      const priorReplacementContext = activeLiveViewContext;
+      const beforeRetiredSender = wsSend;
+      const retiredResponses = [];
+      wsSend = async frame => { retiredResponses.push(frame.type); };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await boundedWait(handleWsMessage(JSON.stringify(liveReplacementFrame), liveReplacementGenerationA, liveReplacementAuthA),
+          'current manifest must reject incoming and duplicate stream frames without reserving a negotiation');
+      }
+      wsSend = beforeRetiredSender;
+      if (retiredResponses.length || activeLiveViewContext !== priorReplacementContext || retiredLiveReplacementStarts) {
+        throw new Error('A retired inbound frame mutated the classroom negotiation or emitted a response');
+      }
+      chrome.runtime.getManifest = () => ({ ...liveManifestBeforeReplacement(),
+        permissions: [...liveManifestBeforeReplacement().permissions, 'tabCapture'] });
       const liveReplacementPromise = handleWsMessage(
         JSON.stringify(liveReplacementFrame),
         liveReplacementGenerationA,
@@ -1420,6 +1435,7 @@ async function main() {
       activeLiveViewContext = liveReplacementContextB;
       releaseLiveReplacementStop();
       const liveReplacementOutcome = await liveReplacementPromise;
+      chrome.runtime.getManifest = liveManifestBeforeReplacement;
       stopScreenShare = originalStopScreenShare;
       handleScreenShareRequest = originalHandleScreenShareRequest;
       const liveReplacementState = {

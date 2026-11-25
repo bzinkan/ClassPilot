@@ -52,8 +52,13 @@ describe("2.9.6 release documentation and preserved sign-in guarantees", () => {
       expect(source).toContain("CLASSPILOT_SCHEDULED_CLASSROOM_MODE=off");
       expect(source).toContain("scheduledClassroomV1");
       expect(source).toContain("scopedAuthorityChecksV1");
-      expect(source).toContain("Live View remains backend-only");
-      expect(source).toMatch(/teacher Live View UI stays disabled/);
+      if (path === "extension/COMPLIANCE.md") {
+        expect(source).toContain("SchoolPilot retired teacher Live View");
+        expect(source).toContain("chrome.tabs.captureVisibleTab");
+      } else {
+        expect(source).toContain("Live View remains backend-only");
+        expect(source).toMatch(/teacher Live View UI stays disabled/);
+      }
     }
     for (const path of ["CLASSPILOT_2_8_9_RELEASE.md", "CLASSPILOT_2_9_0_RELEASE.md", "CLASSPILOT_2_9_1_RELEASE.md"]) {
       const candidate = read(path);

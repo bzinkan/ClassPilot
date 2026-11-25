@@ -105,6 +105,8 @@ Classroom thumbnails use chrome.tabs.captureVisibleTab on the active visible tab
 The offscreen document supports the classroom WebSocket and authorized preview
 cadence. Legacy streaming requests are rejected before media acquisition.
 
+The offscreen creation call retains the inherited USER_MEDIA, DISPLAY_MEDIA and BLOBS reason labels. Active use is the classroom WebSocket and authorized preview timing. The service worker processes preview JPEG Blobs. The package blocks retired streaming requests before media acquisition.
+
 Scheduled classroom activation requires the paired SchoolPilot API/worker
 deployment and additive `classpilot-scheduled-classroom-20260915` migration.
 Keep `CLASSPILOT_SCHEDULED_CLASSROOM_MODE=off` until a separately authorized

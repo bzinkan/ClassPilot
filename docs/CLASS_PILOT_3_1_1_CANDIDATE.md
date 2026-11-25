@@ -1,8 +1,8 @@
 # ClassPilot 3.1.1 student popup contrast
 
 This Chromebook candidate darkens the student popup header, detected email,
-Ask Question and Send buttons, and the empty message text in both render paths.
-The six affected pieces of normal-sized text use a minimum contrast ratio of
+Ask Question and Send buttons, the empty message text in both render paths, and
+the notice shown when a teacher disables messaging. The affected text uses a minimum contrast ratio of
 4.5:1 against their backgrounds.
 
 ## Reduce access for retired streaming
@@ -14,6 +14,8 @@ The remaining all-sites host grant and tabs.captureVisibleTab support the active
 thumbnail feature. The offscreen permission preserves classroom WebSocket and
 preview timing. Google Admin kiosk identity and enterprise.deviceAttributes stay
 unchanged. Existing historical lifecycle tests exercise simulated old privileges.
+
+The offscreen creation call retains the inherited USER_MEDIA, DISPLAY_MEDIA and BLOBS reason labels. Active use is the classroom WebSocket and authorized preview timing. The service worker processes preview JPEG Blobs. The package blocks retired streaming requests before media acquisition.
 
 ## Verify and package
 

@@ -45,6 +45,10 @@ describe("student popup normal text contrast", () => {
     const style = inlineStyle(id);
     expect(contrast(color(style, "color"), color(style, "background"))).toBeGreaterThanOrEqual(4.5);
   });
+  it("keeps the teacher-disabled messaging notice readable", () => {
+    const notice = popup.match(/<p style="([^"]+)">Messaging is currently disabled by your teacher/)?.[1] ?? "";
+    expect(contrast(color(notice, "color"), color(inlineStyle("chat-disabled"), "background"))).toBeGreaterThanOrEqual(4.5);
+  });
   it.each([["initial", popup], ["refreshed", script]])("keeps the %s empty inbox readable", (_name, source) => {
     const style = source.match(/<p style="([^"]+)"[^>]*>\s*No messages yet/)?.[1] ?? "";
     const section = popup.match(/\.section\s*\{([^}]+)\}/)?.[1] ?? "";

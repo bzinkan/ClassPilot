@@ -3308,7 +3308,6 @@ async function main() {
         await staleLiveViewStartPromise;
         const staleLiveViewPreservedCurrent = activeLiveViewNegotiationId === 'current-live-view-n2'
           && activeLiveViewContext?.startGeneration === currentLiveViewStartGeneration;
-        chrome.runtime.getManifest = actualManifest;
         fetchLiveViewIceConfiguration = originalFetchLiveViewIceConfiguration;
         ensureOffscreenDocument = originalEnsureOffscreenDocument;
         sendToOffscreen = originalSendToOffscreen;
@@ -3355,6 +3354,7 @@ async function main() {
           ...duplicateNegotiationFrame,
           _msgId: 'stopped-live-view-delayed-duplicate',
         }), wsConnectionGeneration, authB);
+        chrome.runtime.getManifest = actualManifest;
         handleScreenShareRequest = originalHandleScreenShareRequest;
         currentClassroomState = priorLiveViewClassroomState;
 

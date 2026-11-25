@@ -27992,6 +27992,7 @@ async function handleWsMessage(
       
       // Handle WebRTC signaling - teacher requesting to view screen
       if (message.type === 'request-stream') {
+        if (!chrome.runtime.getManifest().permissions?.includes('tabCapture')) return;
         console.log('[WebRTC] Teacher requested screen share');
         // mode: 'auto' (default) = try silent tab capture, fallback to picker
         // mode: 'tab' = only silent tab capture
