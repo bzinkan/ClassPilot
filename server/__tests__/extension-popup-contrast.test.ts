@@ -45,9 +45,25 @@ describe("student popup normal text contrast", () => {
     const style = inlineStyle(id);
     expect(contrast(color(style, "color"), color(style, "background"))).toBeGreaterThanOrEqual(4.5);
   });
-  it("keeps the teacher-disabled messaging notice readable", () => {
-    const notice = popup.match(/<p style="([^"]+)">Messaging is currently disabled by your teacher/)?.[1] ?? "";
-    expect(contrast(color(notice, "color"), color(inlineStyle("chat-disabled"), "background"))).toBeGreaterThanOrEqual(4.5);
+  it.each([
+    ["chat-disabled", "Messaging"],
+    ["messaging-disabled", "Hand raising"],
+  ])("keeps the %s notice readable", (id, label) => {
+    const notice = popup.match(new RegExp(`<p style="([^"]+)">${label} is currently disabled by your teacher`))?.[1] ?? "";
+    expect(contrast(color(notice, "color"), color(inlineStyle(id), "background"))).toBeGreaterThanOrEqual(4.5);
+  });
+  it.each(["", ".unread"])("keeps the timestamp readable in a message%s", (variant) => {
+    const timestamp = popup.match(/\.message-time\s*\{([^}]+)\}/)?.[1] ?? "";
+    const item = popup.match(new RegExp(`\\.message-item${variant.replace(".", "\\.")}\\s*\\{([^}]+)\\}`))?.[1] ?? "";
+    expect(contrast(color(timestamp, "color"), color(item, "background"))).toBeGreaterThanOrEqual(4.5);
+  });
+  it("keeps Raise Hand readable across its gradient", () => {
+    const style = popup.match(/\.raise-hand-btn\s*\{([^}]+)\}/)?.[1] ?? "";
+    const endpoints = style.match(/linear-gradient\([^)]*\)/)?.[0].match(/#[\da-f]{6}/gi) ?? [];
+    expect(endpoints).toHaveLength(2);
+    for (const endpoint of endpoints) {
+      expect(contrast(color(style, "color"), color(`background: ${endpoint};`, "background"))).toBeGreaterThanOrEqual(4.5);
+    }
   });
   it.each([["initial", popup], ["refreshed", script]])("keeps the %s empty inbox readable", (_name, source) => {
     const style = source.match(/<p style="([^"]+)"[^>]*>\s*No messages yet/)?.[1] ?? "";

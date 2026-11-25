@@ -1,9 +1,22 @@
 # ClassPilot 3.1.1 student popup contrast
 
-This Chromebook candidate darkens the student popup header, detected email,
-Ask Question and Send buttons, the empty message text in both render paths, and
-the notice shown when a teacher disables messaging. The affected text uses a minimum contrast ratio of
-4.5:1 against their backgrounds.
+The packaged popup meets the 4.5:1 normal-text contrast target for the
+header, school name, detected email, Ask Question, Send and empty inbox.
+Additional checks cover the Raise Hand gradient, disabled hand-raising and
+messaging notices, and read and unread message timestamps.
+
+The tested popup is the packaged `popup.html` page. Managed Chromebook students
+ordinarily use the in-page ClassPilot control. The Chromium action has no
+default toolbar popup on that platform.
+
+## Everyday Chromebook classroom controls
+
+An installed-extension browser fixture opens the in-page classroom control
+on a synthetic lesson. The launcher exposes its name and expanded state.
+Students can reach Message by Tab, enter the composer, and return to the
+launcher with Escape or Close. Unavailable class tools stay hidden, and
+keyboard focus is visible. The teacher and student chat bubbles, empty state,
+header and send button use higher contrast. The composer fits narrow views.
 
 ## Reduce access for retired streaming
 

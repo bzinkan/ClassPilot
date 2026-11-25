@@ -3482,7 +3482,7 @@ function renderStudentTools() {
     ${activity && capable('lessonActivitiesV1') ? `<section><h3>${escapeHtml(activity.title)}</h3><p style="white-space:pre-wrap">${escapeHtml(activity.instructions)}</p><div id="classpilot-lesson-links"></div><div id="classpilot-lesson-checklist"></div><label for="classpilot-work-status">My work status</label><select id="classpilot-work-status"><option value="not_reported" disabled>Not reported</option><option value="working">Working</option><option value="stuck">Stuck</option><option value="ready_for_review">Ready for review</option><option value="finished">Finished</option></select><p>Choosing Stuck does not send a help request.</p></section>` : ''}
     ${capable('questionParkingV1') ? '<section><h3>Questions for later</h3><label for="classpilot-question-text">A nonurgent question (up to 500 characters)</label><textarea id="classpilot-question-text" data-tool-draft maxlength="500" rows="2"></textarea><button id="classpilot-question-send">Send question</button><div id="classpilot-my-questions"></div></section>' : ''}`;
   const listen = (id, event, fn) => { const node = document.getElementById(id); if (node) node.addEventListener(event, fn); };
-  listen('classpilot-tools-close', 'click', () => { panel.remove(); document.getElementById('classpilot-fab-tools')?.focus(); });
+  listen('classpilot-tools-close', 'click', () => { panel.remove(); document.getElementById('classpilot-fab-main')?.focus(); });
   const kind = document.getElementById('classpilot-help-kind'); if (kind) kind.value = help?.category || 'assignment';
   const explanation = document.getElementById('classpilot-help-text'); if (explanation) explanation.value = help?.explanation || '';
   listen('classpilot-help-send', 'click', e => submitStudentTool('help-request', { category: kind.value, explanation: explanation.value }, e.currentTarget));
@@ -3525,7 +3525,7 @@ function openStudentTools() {
   }
   const panel = document.createElement('aside'); panel.id = 'classpilot-tools-panel'; panel.setAttribute('aria-label', 'Class tools');
   lifecycle.ownNode(document.body.appendChild(panel));
-  lifecycle.listen(panel, 'keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); panel.remove(); document.getElementById('classpilot-fab-tools')?.focus(); } });
+  lifecycle.listen(panel, 'keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); panel.remove(); document.getElementById('classpilot-fab-main')?.focus(); } });
   renderStudentTools(); document.getElementById('classpilot-tools-close')?.focus();
 }
 
@@ -3565,17 +3565,21 @@ function createFloatingActionButton() {
       <span class="classpilot-monitoring-dot" aria-hidden="true"></span>
       <span>Monitored by school</span>
     </div>
-    <div class="classpilot-fab-menu" id="classpilot-fab-menu">
+    <button type="button" class="classpilot-fab-main" id="classpilot-fab-main" title="ClassPilot"
+      aria-label="ClassPilot classroom controls" aria-expanded="false" aria-controls="classpilot-fab-menu">
+      <span class="classpilot-fab-main-icon" aria-hidden="true">🎓</span>
+    </button>
+    <div class="classpilot-fab-menu" id="classpilot-fab-menu" inert>
       <div class="classpilot-fab-identity" id="classpilot-fab-identity" style="display:none;">
         <span class="classpilot-fab-identity-kicker">Monitoring as</span>
         <span class="classpilot-fab-identity-name" id="classpilot-fab-identity-name"></span>
       </div>
       <button class="classpilot-fab-item classpilot-fab-message" id="classpilot-fab-message" title="Message Teacher">
-        <span class="classpilot-fab-icon">💬</span>
+        <span class="classpilot-fab-icon" aria-hidden="true">💬</span>
         <span class="classpilot-fab-label">Message</span>
       </button>
       <button class="classpilot-fab-item classpilot-fab-hand" id="classpilot-fab-hand" title="Raise Hand">
-        <span class="classpilot-fab-icon">✋</span>
+        <span class="classpilot-fab-icon" aria-hidden="true">✋</span>
         <span class="classpilot-fab-label">Raise Hand</span>
       </button>
       <button class="classpilot-fab-item" id="classpilot-fab-tools" title="Class tools" hidden>
@@ -3583,24 +3587,21 @@ function createFloatingActionButton() {
         <span class="classpilot-fab-label">Class tools</span>
       </button>
       <button class="classpilot-fab-item classpilot-fab-signout" id="classpilot-fab-signout" title="Log out">
-        <span class="classpilot-fab-icon">⎋</span>
+        <span class="classpilot-fab-icon" aria-hidden="true">⎋</span>
         <span class="classpilot-fab-label">Log out</span>
       </button>
     </div>
-    <button class="classpilot-fab-main" id="classpilot-fab-main" title="ClassPilot">
-      <span class="classpilot-fab-main-icon">🎓</span>
-    </button>
-    <div class="classpilot-fab-message-box" id="classpilot-fab-message-box">
+    <div class="classpilot-fab-message-box" id="classpilot-fab-message-box" role="group" aria-label="Chat with teacher" inert>
       <div class="classpilot-fab-message-header">
         <span>💬 Chat with Teacher</span>
-        <button class="classpilot-fab-message-close" id="classpilot-fab-message-close">×</button>
+        <button class="classpilot-fab-message-close" id="classpilot-fab-message-close" aria-label="Close teacher chat">×</button>
       </div>
       <div class="classpilot-fab-chat-messages" id="classpilot-fab-chat-messages"></div>
       <div class="classpilot-fab-chat-pause" id="classpilot-fab-chat-pause"></div>
       <div class="classpilot-fab-chat-input-area">
-        <input type="text" class="classpilot-fab-chat-input" id="classpilot-fab-chat-input" placeholder="Type a message..." maxlength="500" />
+        <input type="text" class="classpilot-fab-chat-input" id="classpilot-fab-chat-input" aria-label="Message to teacher" placeholder="Type a message..." maxlength="500" />
         <span class="classpilot-fab-chat-counter" id="classpilot-fab-chat-counter"></span>
-        <button class="classpilot-fab-chat-send-btn" id="classpilot-fab-chat-send-btn">➤</button>
+        <button class="classpilot-fab-chat-send-btn" id="classpilot-fab-chat-send-btn" aria-label="Send message">➤</button>
       </div>
     </div>
   `;
@@ -3645,7 +3646,8 @@ function createFloatingActionButton() {
       chatMessages = [];
       persistFabChatState();
     }
-    showMessageBox();
+    closeFabMenu();
+    showMessageBox({ focusInput: true });
   });
 
   lifecycle.listen(document.getElementById('classpilot-fab-signout'), 'click', (e) => {
@@ -3657,6 +3659,18 @@ function createFloatingActionButton() {
   lifecycle.listen(document.getElementById('classpilot-fab-message-close'), 'click', (e) => {
     e.stopPropagation();
     hideMessageBox();
+    document.getElementById('classpilot-fab-main')?.focus();
+  });
+
+  lifecycle.listen(fabContainer, 'keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    const chat = document.getElementById('classpilot-fab-message-box');
+    if (chat && !chat.inert && chat.contains(event.target)) hideMessageBox();
+    else if (!fabExpanded) return;
+    closeFabMenu();
+    document.getElementById('classpilot-fab-main')?.focus();
+    event.preventDefault();
+    event.stopPropagation();
   });
 
   // Send message via button click
@@ -3696,6 +3710,8 @@ function toggleFabMenu() {
   const menu = document.getElementById('classpilot-fab-menu');
   const main = document.getElementById('classpilot-fab-main');
   fabExpanded = !fabExpanded;
+  menu.inert = !fabExpanded;
+  main.setAttribute('aria-expanded', String(fabExpanded));
 
   if (fabExpanded) {
     menu.classList.add('classpilot-fab-menu-open');
@@ -3711,20 +3727,27 @@ function closeFabMenu() {
   const menu = document.getElementById('classpilot-fab-menu');
   const main = document.getElementById('classpilot-fab-main');
   fabExpanded = false;
+  if (menu) menu.inert = true;
+  main?.setAttribute('aria-expanded', 'false');
   menu?.classList.remove('classpilot-fab-menu-open');
   main?.classList.remove('classpilot-fab-main-active');
 }
 
-function showMessageBox() {
+function showMessageBox({ focusInput = false } = {}) {
   if (!chatChannelOn()) {
     showFabNotification('Messaging is currently disabled by your teacher.', true);
     return;
   }
   const messageBox = document.getElementById('classpilot-fab-message-box');
-  messageBox?.classList.add('classpilot-fab-message-box-open');
+  if (!messageBox) return;
+  messageBox.inert = false;
+  messageBox.classList.add('classpilot-fab-message-box-open');
   renderChatMessages();
   updateFabChatControls();
-  document.getElementById('classpilot-fab-chat-input')?.focus();
+  if (focusInput) {
+    const input = document.getElementById('classpilot-fab-chat-input');
+    (input?.disabled ? document.getElementById('classpilot-fab-message-close') : input)?.focus();
+  }
   reportTeacherMessagesSeen();
 }
 
@@ -3745,7 +3768,10 @@ function showChatForTeacherMessage() {
 
 function hideMessageBox() {
   const messageBox = document.getElementById('classpilot-fab-message-box');
-  messageBox?.classList.remove('classpilot-fab-message-box-open');
+  if (messageBox) {
+    messageBox.inert = true;
+    messageBox.classList.remove('classpilot-fab-message-box-open');
+  }
 }
 
 function raiseHand() {
@@ -3807,7 +3833,8 @@ function updateFabHandState() {
   const handBtn = document.getElementById('classpilot-fab-hand');
   const label = handBtn?.querySelector('.classpilot-fab-label');
 
-  // Handle disabled state
+  handBtn?.setAttribute('aria-disabled', String(!handRaisingEnabled));
+  handBtn?.setAttribute('aria-label', !handRaisingEnabled ? 'Hand raising unavailable' : handRaised ? 'Lower hand' : 'Raise hand');
   if (!handRaisingEnabled) {
     handBtn?.classList.add('classpilot-fab-disabled');
     handBtn?.classList.remove('classpilot-fab-hand-raised');
@@ -3830,7 +3857,10 @@ function updateFabMessageState() {
   const messageBtn = document.getElementById('classpilot-fab-message');
   const label = messageBtn?.querySelector('.classpilot-fab-label');
 
-  if (!chatChannelOn()) {
+  const available = chatChannelOn();
+  messageBtn?.setAttribute('aria-disabled', String(!available));
+  messageBtn?.setAttribute('aria-label', available ? 'Message teacher' : 'Messaging unavailable');
+  if (!available) {
     messageBtn?.classList.add('classpilot-fab-disabled');
     if (label) label.textContent = 'Unavailable';
   } else {
@@ -4121,7 +4151,7 @@ function addFabStyles() {
       opacity: 0;
       visibility: hidden;
       transform: translateY(20px);
-      transition: all 0.3s ease;
+      transition: opacity 0.3s ease, transform 0.3s ease;
     }
 
     .classpilot-fab-menu.classpilot-fab-menu-open {
@@ -4174,6 +4204,14 @@ function addFabStyles() {
       white-space: nowrap;
     }
 
+    .classpilot-fab-item[hidden] { display: none; }
+
+    #classpilot-fab-container :focus-visible {
+      outline: 3px solid #0f172a;
+      outline-offset: 2px;
+      box-shadow: 0 0 0 2px #fff;
+    }
+
     .classpilot-fab-item:hover {
       transform: translateX(-5px);
       box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
@@ -4224,15 +4262,15 @@ function addFabStyles() {
       position: absolute;
       bottom: 70px;
       right: 0;
-      width: 320px;
-      height: 400px;
+      width: min(320px, calc(100vw - 40px));
+      height: min(400px, calc(100dvh - 100px));
       background: white;
       border-radius: 16px;
       box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
       opacity: 0;
       visibility: hidden;
       transform: translateY(20px) scale(0.95);
-      transition: all 0.3s ease;
+      transition: opacity 0.3s ease, transform 0.3s ease;
       overflow: hidden;
       display: flex;
       flex-direction: column;
@@ -4249,7 +4287,7 @@ function addFabStyles() {
       justify-content: space-between;
       align-items: center;
       padding: 12px 16px;
-      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
       color: white;
       font-weight: 600;
       font-size: 14px;
@@ -4264,7 +4302,6 @@ function addFabStyles() {
       cursor: pointer;
       padding: 0;
       line-height: 1;
-      opacity: 0.8;
     }
 
     .classpilot-fab-message-close:hover {
@@ -4283,7 +4320,7 @@ function addFabStyles() {
 
     .classpilot-chat-empty {
       text-align: center;
-      color: #94a3b8;
+      color: #475569;
       font-size: 13px;
       padding: 40px 16px;
     }
@@ -4303,7 +4340,7 @@ function addFabStyles() {
 
     .classpilot-chat-bubble-student {
       align-self: flex-end;
-      background: #3b82f6;
+      background: #1d4ed8;
       color: white;
       border-bottom-right-radius: 4px;
     }
@@ -4313,7 +4350,6 @@ function addFabStyles() {
       margin-top: 3px;
       font-size: 10px;
       line-height: 1.2;
-      opacity: 0.82;
       text-align: right;
     }
 
@@ -4322,7 +4358,6 @@ function addFabStyles() {
       margin-top: 3px;
       font-size: 10px;
       line-height: 1.2;
-      opacity: 0.72;
     }
 
     .classpilot-fab-chat-pause {
@@ -4351,7 +4386,7 @@ function addFabStyles() {
 
     .classpilot-chat-bubble-teacher {
       align-self: flex-start;
-      background: #10b981;
+      background: #065f46;
       color: white;
       border-bottom-left-radius: 4px;
     }
@@ -4366,6 +4401,7 @@ function addFabStyles() {
     }
 
     .classpilot-fab-chat-input {
+      min-width: 0;
       flex: 1;
       padding: 8px 12px;
       border: 1px solid #e2e8f0;
@@ -4385,7 +4421,7 @@ function addFabStyles() {
       height: 36px;
       border: none;
       border-radius: 50%;
-      background: #3b82f6;
+      background: #1d4ed8;
       color: white;
       font-size: 16px;
       cursor: pointer;
