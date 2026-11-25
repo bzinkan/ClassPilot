@@ -11,7 +11,10 @@ This candidate removes the required tabCapture and optional desktopCapture
 permissions. The production service retired Live View and parked its TURN
 infrastructure. A stale request cannot start a legacy stream or screen picker.
 The remaining all-sites host grant and tabs.captureVisibleTab support the active
-thumbnail feature. The offscreen permission preserves classroom WebSocket and
+thumbnail feature and a separate selected-student detail preview when an
+authorized classroom view is open. A short detail lease permits one still
+image up to 1920 pixels per five seconds. The extension keeps those pixels
+only in memory locally. The offscreen permission preserves classroom WebSocket and
 preview timing. Google Admin kiosk identity and enterprise.deviceAttributes stay
 unchanged. Existing historical lifecycle tests exercise simulated old privileges.
 
