@@ -9,12 +9,15 @@ function read(path: string) {
 }
 
 describe("2.9.6 release documentation and preserved sign-in guarantees", () => {
-  it("pins every active release instruction to the versioned 2.9.6 artifact", () => {
+  it("preserves historical 2.9.6 evidence and requires the current release to match its tag", () => {
     const readme = read("extension/README.md");
     const compliance = read("extension/COMPLIANCE.md");
     const deployment = read("DEPLOYMENT.md");
 
-    for (const source of [readme, compliance, deployment]) {
+    expect(compliance).toContain("whose filename and manifest match the");
+    expect(compliance).toContain("reviewed, tagged release");
+    expect(compliance).not.toContain("ClassPilot-v2.9.6.zip");
+    for (const source of [readme, deployment]) {
       expect(source).toContain("ClassPilot-v2.9.6.zip");
       expect(source).not.toContain("ClassPilot-v2.9.5.zip");
       expect(source).not.toContain("ClassPilot-v2.9.3.zip");
@@ -52,8 +55,16 @@ describe("2.9.6 release documentation and preserved sign-in guarantees", () => {
       expect(source).toContain("CLASSPILOT_SCHEDULED_CLASSROOM_MODE=off");
       expect(source).toContain("scheduledClassroomV1");
       expect(source).toContain("scopedAuthorityChecksV1");
-      expect(source).toContain("Live View remains backend-only");
-      expect(source).toMatch(/teacher Live View UI stays disabled/);
+      if (path === "extension/COMPLIANCE.md") {
+        expect(source).toContain("SchoolPilot retired teacher Live View");
+        expect(source).toContain("chrome.tabs.captureVisibleTab");
+      } else if (path === "extension/README.md") {
+        expect(source).toContain("SchoolPilot service has retired Live View");
+        expect(source).toContain("authorized detailed still of one selected student");
+      } else {
+        expect(source).toContain("Live View remains backend-only");
+        expect(source).toMatch(/teacher Live View UI stays disabled/);
+      }
     }
     for (const path of ["CLASSPILOT_2_8_9_RELEASE.md", "CLASSPILOT_2_9_0_RELEASE.md", "CLASSPILOT_2_9_1_RELEASE.md"]) {
       const candidate = read(path);

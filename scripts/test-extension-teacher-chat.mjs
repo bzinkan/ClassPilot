@@ -703,6 +703,32 @@ try {
     { messagingEnabled: true, messagesPaused: false });
   await settle();
   assert.equal((await chatView()).visibility, 'visible', 'the lesson page must be visible for seen receipts');
+  // Use the content script's real lesson-page controls and native focus order.
+  const classroomControls = page.getByRole('button', { name: 'ClassPilot classroom controls' });
+  const messageAction = page.getByRole('button', { name: 'Message teacher' });
+  await classroomControls.focus();
+  await page.keyboard.press('Enter');
+  assert.equal(await classroomControls.getAttribute('aria-expanded'), 'true');
+  await page.keyboard.press('Tab');
+  assert.equal(await messageAction.evaluate(node => document.activeElement === node), true);
+  await page.keyboard.press('Escape');
+  assert.equal(await classroomControls.getAttribute('aria-expanded'), 'false');
+  assert.equal(await classroomControls.evaluate(node => document.activeElement === node), true);
+  await page.keyboard.press('Space');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Enter');
+  const composer = page.getByRole('textbox', { name: 'Message to teacher' });
+  assert.equal(await composer.evaluate(node => document.activeElement === node), true);
+  assert.equal(await page.getByRole('button', { name: 'Send message' }).isVisible(), true);
+  await page.keyboard.press('Escape');
+  assert.equal(await composer.count(), 0);
+  assert.equal(await classroomControls.evaluate(node => document.activeElement === node), true);
+  await page.keyboard.press('Space');
+  await messageAction.press('Enter');
+  await page.getByRole('button', { name: 'Close teacher chat' }).press('Enter');
+  assert.equal(await composer.count(), 0);
+  assert.equal(await classroomControls.evaluate(node => document.activeElement === node), true);
+
   outcomes.start = await step(() => fixture(() => __chatFixture.reply('chat-r1', 'Can you show me your work?')));
 
   // Phase B: the teacher ends the chat. A message persisted before the close

@@ -19,7 +19,7 @@
     }
     
     .header {
-      background: #3b82f6;
+      background: #1d4ed8;
       color: white;
       padding: 16px;
       text-align: center;
@@ -265,7 +265,7 @@
     
     .message-time {
       font-size: 10px;
-      color: #64748b;
+      color: #475569;
     }
     
     .message-content {
@@ -305,7 +305,7 @@
       width: 100%;
       padding: 12px 16px;
       background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-      color: white;
+      color: #111827;
       border: none;
       border-radius: 8px;
       font-size: 14px;
@@ -381,10 +381,10 @@
       </div>
     </div>
 
-    <div class="monitoring-disclosure" aria-label="ClassPilot monitoring disclosure">
-      <h2><span class="status-dot online"></span><span>School-managed monitoring is visible</span></h2>
+    <section class="monitoring-disclosure" aria-labelledby="monitoring-disclosure-heading">
+      <h2 id="monitoring-disclosure-heading"><span class="status-dot online"></span><span>School-managed monitoring is visible</span></h2>
       <p>ClassPilot does not collect keystrokes, typed passwords, microphone audio, camera video, or private-window activity.</p>
-    </div>
+    </section>
     
     <div class="section">
       <h2>Student Information</h2>
@@ -392,7 +392,7 @@
         <div id="auto-detected-student" style="padding: 12px; background: #f0f9ff; border-left: 4px solid #3b82f6; border-radius: 4px;">
           <p style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #1e40af; margin-bottom: 4px;">AUTO-DETECTED STUDENT</p>
           <p id="detected-student-name" style="font-size: 14px; font-weight: 600; color: #1e3a8a; margin-bottom: 4px;" data-testid="text-detected-student">Loading...</p>
-          <p id="detected-student-email" style="font-size: 12px; color: #3b82f6;" data-testid="text-detected-email">Loading...</p>
+          <p id="detected-student-email" style="font-size: 12px; color: #1d4ed8;" data-testid="text-detected-email">Loading...</p>
         </div>
         <p style="font-size: 11px; color: #64748b; margin-top: 8px; font-style: italic;">
           ✓ Automatically linked to your Chromebook login
@@ -445,7 +445,7 @@
         </button>
       </div>
       <div id="messaging-disabled" class="hidden" style="margin-top: 12px; padding: 12px; background: #f1f5f9; border-left: 4px solid #94a3b8; border-radius: 4px;">
-        <p style="font-size: 12px; color: #64748b;">Hand raising is currently disabled by your teacher.</p>
+        <p style="font-size: 12px; color: #475569;">Hand raising is currently disabled by your teacher.</p>
       </div>
     </div>
 
@@ -457,10 +457,10 @@
       <textarea id="chat-input" placeholder="Type your message..."
         style="width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; resize: none; height: 60px; font-family: inherit;"></textarea>
       <div style="display: flex; gap: 8px; margin-top: 8px;">
-        <button id="send-question-btn" style="flex: 1; padding: 8px 12px; background: #8b5cf6; color: white; border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;">
+        <button id="send-question-btn" style="flex: 1; padding: 8px 12px; background: #6d28d9; color: white; border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;">
           ❓ Ask Question
         </button>
-        <button id="send-message-btn" style="flex: 1; padding: 8px 12px; background: #10b981; color: white; border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;">
+        <button id="send-message-btn" style="flex: 1; padding: 8px 12px; background: #047857; color: white; border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;">
           💬 Send
         </button>
       </div>
@@ -469,7 +469,7 @@
         <p style="font-size: 11px; color: #15803d; margin-top: 4px;">Your teacher will see your message.</p>
       </div>
       <div id="chat-disabled" class="hidden" style="margin-top: 12px; padding: 12px; background: #f1f5f9; border-left: 4px solid #94a3b8; border-radius: 4px;">
-        <p style="font-size: 12px; color: #64748b;">Messaging is currently disabled by your teacher.</p>
+        <p style="font-size: 12px; color: #475569;">Messaging is currently disabled by your teacher.</p>
       </div>
       <div id="chat-paused" class="hidden" style="margin-top: 12px; padding: 12px; background: #fffbeb; border-left: 4px solid #f59e0b; border-radius: 4px;">
         <p id="chat-paused-text" style="font-size: 12px; color: #92400e;">Messages are paused by your teacher.</p>
@@ -479,7 +479,7 @@
     <div class="section">
       <h2>📢 Announcements & Messages</h2>
       <div id="messages-container">
-        <p style="font-size: 12px; color: #94a3b8; text-align: center; padding: 20px;">
+        <p style="font-size: 12px; color: #475569; text-align: center; padding: 20px;">
           No messages yet
         </p>
       </div>

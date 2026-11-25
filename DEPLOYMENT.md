@@ -7,6 +7,10 @@
 > `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
 > ClassPilot Chrome extension. There are no production default credentials.
 >
+> The extension release procedures and version numbers below are historical 2.9.6
+> guidance. For the current 3.1.1 package, use the [candidate record](docs/CLASS_PILOT_3_1_1_CANDIDATE.md)
+> and the release commands in [CLAUDE.md](CLAUDE.md).
+>
 > The 2.9.6 candidate is unsubmitted. Local packages may be used for integration
 > verification; these instructions do not authorize tagging, upload or publication.
 > After separate release authorization,

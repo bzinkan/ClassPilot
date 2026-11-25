@@ -16,17 +16,21 @@ if (configured) assert.ok(existsSync(configured), 'CLASSPILOT_CHROME_PATH must i
 const executablePath = configured || [chromium.executablePath(),
   'C:/Program Files/Google/Chrome/Application/chrome.exe'].find(path => existsSync(path));
 assert.ok(executablePath, 'Install Chromium or set CLASSPILOT_CHROME_PATH');
-for (const permission of ['alarms', 'offscreen', 'tabCapture', 'activeTab', 'tabs']) {
+for (const permission of ['alarms', 'offscreen', 'activeTab', 'tabs']) {
   assert.ok(sourceManifest.permissions.includes(permission), `Shipped manifest must include ${permission}`);
 }
 
+const requested = [...sourceManifest.permissions, ...(sourceManifest.optional_permissions || [])];
+assert.ok(!requested.includes('tabCapture') && !requested.includes('desktopCapture'));
+assert.ok(sourceManifest.host_permissions.includes('<all_urls>'), 'The installed screenshot path requires host access');
 const scratch = mkdtempSync(join(tmpdir(), 'classpilot-browser-api-'));
 const extension = join(scratch, 'extension');
 mkdirSync(extension);
 writeFileSync(join(extension, 'manifest.json'), JSON.stringify({
   manifest_version: 3, name: 'ClassPilot native API compatibility fixture', version: sourceManifest.version,
   minimum_chrome_version: sourceManifest.minimum_chrome_version,
-  permissions: ['alarms', 'offscreen', 'tabCapture', 'activeTab', 'tabs'],
+  permissions: ['alarms', 'offscreen', 'activeTab', 'tabs'],
+  host_permissions: ['<all_urls>'],
   background: { service_worker: 'worker.js' },
 }));
 writeFileSync(join(extension, 'worker.js'), `
@@ -41,17 +45,7 @@ writeFileSync(join(extension, 'offscreen.js'), `
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.type !== 'api-smoke-offscreen') return;
   (async () => {
-    const peer = new RTCPeerConnection({ iceServers: [] });
-    peer.close();
-    const result = { getUserMedia: typeof navigator.mediaDevices?.getUserMedia,
-      getDisplayMedia: typeof navigator.mediaDevices?.getDisplayMedia,
-      peerClosed: peer.connectionState === 'closed' };
-    if (message.streamId) {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: false,
-        video: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: message.streamId } } });
-      result.liveVideo = stream.getVideoTracks().some(track => track.readyState === 'live');
-      stream.getTracks().forEach(track => track.stop());
-    }
+    const result = { socketApi: typeof WebSocket };
     respond({ success: true, ...result });
   })().catch(error => respond({ success: false, errorName: error.name }));
   return true;
@@ -99,8 +93,8 @@ try {
     await chrome.alarms.create(alarmName, { periodInMinutes: 0.5 });
     const alarm = await chrome.alarms.get(alarmName);
     await chrome.alarms.clear(alarmName);
-    await chrome.offscreen.createDocument({ url: 'offscreen.html', reasons: ['USER_MEDIA'],
-      justification: 'Verify extension worker and offscreen media API compatibility on a local synthetic page' });
+    await chrome.offscreen.createDocument({ url: 'offscreen.html', reasons: ['BLOBS'],
+      justification: 'Verify the classroom offscreen messaging interface on a local synthetic page' });
     const deadline = Date.now() + 5_000;
     while (!globalThis.offscreenReady && Date.now() < deadline) await new Promise(done => setTimeout(done, 20));
     if (!globalThis.offscreenReady) throw new Error('The native offscreen document did not signal readiness');
@@ -108,33 +102,19 @@ try {
     const tabs = await chrome.tabs.query({});
     const target = tabs.find(tab => tab.url?.startsWith(targetUrl));
     if (!target) throw new Error('Local capture target tab was not found');
-    let capture = 'permission-denied';
-    let streamId = null;
-    const request = chrome.tabCapture.getMediaStreamId({ targetTabId: target.id });
-    if (!request || typeof request.then !== 'function') throw new Error('tabCapture.getMediaStreamId must return a Promise');
-    try {
-      streamId = await request;
-      if (typeof streamId !== 'string' || !streamId) throw new Error('Native capture returned an invalid stream identifier');
-      capture = 'stream-issued';
-    } catch (error) {
-      // No toolbar invocation or permission-bypassing flag is synthesized. An
-      // ordinary activeTab denial is an expected result, not media validation.
-      if (!/not been invoked|activeTab permission|not allowed to capture/i.test(String(error.message))) throw error;
-    }
-    const media = await chrome.runtime.sendMessage({ type: 'api-smoke-offscreen', streamId });
-    return { alarmPeriod: alarm?.periodInMinutes, offscreenContexts: contexts.length, capture, media };
+    await chrome.tabs.update(target.id, { active: true });
+    const screenshot = await chrome.tabs.captureVisibleTab(target.windowId, { format: 'jpeg', quality: 40 });
+    const media = await chrome.runtime.sendMessage({ type: 'api-smoke-offscreen' });
+    return { alarmPeriod: alarm?.periodInMinutes, offscreenContexts: contexts.length, media,
+      capturedJpeg: /^data:image\/jpeg;base64,/.test(screenshot) && screenshot.length > 100 };
   }, origin));
   assert.equal(result.alarmPeriod, 0.5, 'Chrome must retain the requested 30-second alarm period');
   assert.equal(result.offscreenContexts, 1, 'Worker must discover the native offscreen document');
-  assert.equal(result.media?.success, true, 'Worker must receive the offscreen media API response');
-  assert.equal(result.media.getUserMedia, 'function');
-  assert.equal(result.media.getDisplayMedia, 'function');
-  assert.equal(result.media.peerClosed, true);
-  if (result.capture === 'stream-issued') assert.equal(result.media.liveVideo, true, 'A normally granted worker stream must be consumable offscreen');
+  assert.equal(result.media?.success, true, 'Worker must receive the offscreen response');
+  assert.equal(result.media.socketApi, 'function', 'Offscreen classroom transport must remain available');
+  assert.equal(result.capturedJpeg, true, 'Current permissions must permit a bounded visible-tab screenshot');
   console.log(JSON.stringify({ browser: product, extensionVersion: sourceManifest.version,
-    alarmPeriodInMinutes: result.alarmPeriod, offscreenMessaging: 'passed', webRtcConstruction: 'passed',
-    tabCapture: result.capture === 'stream-issued' ? 'worker-stream-consumed-offscreen' : 'Promise API present; normal invocation permission required',
-    limits: 'Unpacked API smoke verifies the retained alarm period, not production alarm firing cadence. No permission or user-gesture bypass flags.' }));
+    alarmPeriodInMinutes: result.alarmPeriod, offscreenMessaging: 'passed', visibleTabJpeg: 'passed' }));
 } finally {
   await context?.close();
   await new Promise(done => server.close(done));

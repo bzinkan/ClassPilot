@@ -3253,6 +3253,9 @@ async function main() {
         };
         const iceConfiguration = await fetchLiveViewIceConfiguration('negotiation-1', authB);
 
+        // Exercise the historical privileged lifecycle independently of the shipped manifest.
+        const actualManifest = chrome.runtime.getManifest;
+        chrome.runtime.getManifest = () => ({ ...actualManifest(), permissions: [...actualManifest().permissions, 'tabCapture'] });
         const originalFetchLiveViewIceConfiguration = fetchLiveViewIceConfiguration;
         const originalEnsureOffscreenDocument = ensureOffscreenDocument;
         const originalSendToOffscreen = sendToOffscreen;
@@ -3351,6 +3354,7 @@ async function main() {
           ...duplicateNegotiationFrame,
           _msgId: 'stopped-live-view-delayed-duplicate',
         }), wsConnectionGeneration, authB);
+        chrome.runtime.getManifest = actualManifest;
         handleScreenShareRequest = originalHandleScreenShareRequest;
         currentClassroomState = priorLiveViewClassroomState;
 

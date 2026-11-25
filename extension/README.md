@@ -2,9 +2,12 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared Chromebook candidate is **3.1.0**. Long class announcements keep
-the student’s **Close** button visible on shorter viewports while the message
-body scrolls. See the [3.1.0 candidate record](../docs/CLASS_PILOT_3_1_0_CANDIDATE.md).
+The prepared Chromebook candidate is **3.1.1**. The in-page classroom control
+improves keyboard navigation, focus, control names and chat contrast. The
+packaged popup page also improves hand raising, messaging, the school header,
+detected email and empty inbox. The release removes the Chrome permissions
+previously declared for the retired Live View feature. See the
+[3.1.1 candidate record](../docs/CLASS_PILOT_3_1_1_CANDIDATE.md).
 
 The release retains 3.0.9’s entire-website Focus on
 `classroom.google.com` includes Google Docs, Drive, Sheets, Slides, Forms and
@@ -460,8 +463,8 @@ user-facing prompt and only functions for policy-installed extensions.
 
 ### Exact-bound monitoring and delivery (2.7.1)
 
-Every authenticated heartbeat, screenshot, command acknowledgement, chat
-retry, and Live View negotiation is fenced to an immutable school, student,
+Every authenticated heartbeat, screenshot, command acknowledgement and chat
+retry is fenced to an immutable school, student,
 student-session, device, server-origin, and authentication context. Work that
 finishes after an identity transition is discarded. Teacher commands validate
 that binding before expiry checks, deduplication, acknowledgements, or side
@@ -529,9 +532,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-The current Chromebook candidate output is `dist/ClassPilot-v3.1.0.zip`, with
-its matching `.sha256` record. Follow the [3.1.0 candidate
-record](../docs/CLASS_PILOT_3_1_0_CANDIDATE.md), preserve every older versioned
+The current Chromebook candidate output is `dist/ClassPilot-v3.1.1.zip`, with
+its matching `.sha256` record. Follow the [3.1.1 candidate
+record](../docs/CLASS_PILOT_3_1_1_CANDIDATE.md), preserve every older versioned
 archive, and keep the exact verified ZIP unchanged. The 2.9.6 release paragraph
 below remains historical evidence.
 
@@ -657,9 +660,8 @@ clear when their classroom authority expires or changes.
 Activation requires the paired SchoolPilot API/worker deployment and additive
 `classpilot-scheduled-classroom-20260915` migration. Keep
 `CLASSPILOT_SCHEDULED_CLASSROOM_MODE=off` until a separately authorized rollout.
-Live View remains backend-only; the teacher Live View UI stays disabled even
-when the scheduled classroom rollout is enabled. Compatible backend/extension
-support does not expose the feature in the Dashboard.
+The current SchoolPilot service has retired Live View. Scheduled classroom
+activation uses the scoped periodic preview paths documented above.
 
 Version 2.8.9 added no Chrome permission or managed-policy key, and 2.9.0
 carries it forward unchanged. Preparing a version does not authorize tagging,
@@ -827,22 +829,21 @@ observations; **Full** retains normal monitoring behavior.
 Monitored time, domain time, and off-task duration are derived from the
 10-second heartbeat stream. Screenshots are not used for those calculations.
 
-### Live Screen Viewing
-- Teachers may request live viewing during active class sessions
-- Managed ChromeOS devices can allow silent tab capture through school Chrome policy
-- On unmanaged devices, Chrome may show a picker instead
-- Live streams are not recorded by the extension or SchoolPilot servers; the
-  authorized teacher dashboard can explicitly save a local recording or still
-  image that is controlled by the school
-- Short-lived, server-authorized ICE configuration may include SchoolPilot TURN
-  relays so a session can connect when direct UDP is unavailable
+### Classroom previews
+
+ClassPilot 3.1.1 provides scoped periodic still images of the active visible
+tab. A visible, authorized classroom view can also receive a separately
+authorized detailed still of one selected student, up to once per five
+seconds. SchoolPilot retired Live View and its TURN relay. Version 3.1.1
+removes the Chrome permissions previously declared for streaming.
 
 ### Transparency & Disclosure
-The extension popup clearly displays:
+The packaged popup page includes:
 - Banner stating "Monitoring Active"
 - A school-managed monitoring disclosure
 - Current connection status
-- In-page FAB indicator stating "Monitored by school"
+
+On managed Chromebooks, students normally use the in-page ClassPilot control.
 
 ### Events Logged
 The extension keeps a bounded retry outbox for authorized teaching-session or
@@ -932,7 +933,6 @@ extension/
 
 ### Badge States
 - 🟢 Green dot (●) - Connected and sending heartbeats
-- 🔴 Red circle (◉) - Screen sharing active
 - ❗ Red exclamation (!) - Connection error
 
 ## Troubleshooting
@@ -943,11 +943,11 @@ extension/
 - Ensure student completed setup in popup
 - Check that cookies are enabled
 
-### Screen Sharing Not Working
-- Verify popup has user gesture (must click button)
-- Check browser console for WebRTC errors
-- Ensure Chrome has screen capture permissions
-- Verify WebSocket connection is established
+### Classroom preview unavailable
+
+Check the school monitoring mode, active student session, and current
+classroom tracking authorization. A higher-resolution selected-student still
+also requires a visible authorized class view and its own short-lived grant.
 
 ### WebSocket Connection Issues
 - Check that server is running

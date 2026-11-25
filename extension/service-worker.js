@@ -26377,7 +26377,7 @@ async function ensureOffscreenDocument() {
       await chrome.offscreen.createDocument({
         url: 'offscreen.html',
         reasons: ['USER_MEDIA', 'DISPLAY_MEDIA', 'BLOBS'],
-        justification: 'Screen capture, WebRTC, and WebSocket must run in page context for MV3 compatibility'
+        justification: 'Maintain the classroom WebSocket and authorized preview cadence across Manifest V3 worker suspension'
       });
       console.log('[Service Worker] Offscreen document created');
     } catch (error) {
@@ -26697,6 +26697,9 @@ async function handleScreenShareRequest(
   let authContext;
   let requestContext = null;
   let startTransmissionAttempted = false;
+  // New builds do not request live-stream access. A legacy frame must never
+  // fall through to an offscreen display picker or request ICE configuration.
+  if (!chrome.runtime.getManifest().permissions?.includes('tabCapture')) return;
   try {
     authContext = captureAuthenticatedContext('Live View start');
     requestContext = activeLiveViewContext;
@@ -27989,6 +27992,7 @@ async function handleWsMessage(
       
       // Handle WebRTC signaling - teacher requesting to view screen
       if (message.type === 'request-stream') {
+        if (!chrome.runtime.getManifest().permissions?.includes('tabCapture')) return;
         console.log('[WebRTC] Teacher requested screen share');
         // mode: 'auto' (default) = try silent tab capture, fallback to picker
         // mode: 'tab' = only silent tab capture
