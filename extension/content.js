@@ -4145,19 +4145,13 @@ function addFabStyles() {
       position: absolute;
       bottom: 104px;
       right: 0;
-      display: flex;
+      display: none;
       flex-direction: column;
       gap: 12px;
-      opacity: 0;
-      visibility: hidden;
-      transform: translateY(20px);
-      transition: opacity 0.3s ease, transform 0.3s ease;
     }
 
     .classpilot-fab-menu.classpilot-fab-menu-open {
-      opacity: 1;
-      visibility: visible;
-      transform: translateY(0);
+      display: flex;
     }
 
     .classpilot-fab-identity {
