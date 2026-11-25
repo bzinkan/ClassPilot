@@ -397,7 +397,7 @@ async function loadMessages() {
   
   if (messages.length === 0) {
     container.innerHTML = `
-      <p style="font-size: 12px; color: #94a3b8; text-align: center; padding: 20px;">
+      <p style="font-size: 12px; color: #475569; text-align: center; padding: 20px;">
         No messages yet
       </p>
     `;
