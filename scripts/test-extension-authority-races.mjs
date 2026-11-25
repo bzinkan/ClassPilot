@@ -1441,8 +1441,25 @@ async function main() {
         activeLiveViewTeachingSessionId,
       );
       activeLiveViewContext = startCancelContextA;
+      // The real reduced manifest must stop an otherwise active, bound request
+      // before an ICE fetch, offscreen setup, or screen-picker fallback.
+      const originalIceFetch = fetchLiveViewIceConfiguration;
+      const originalOffscreenSetup = ensureOffscreenDocument;
+      let retiredCaptureOperations = 0;
+      fetchLiveViewIceConfiguration = async () => { retiredCaptureOperations++; };
+      ensureOffscreenDocument = async () => { retiredCaptureOperations++; };
+      await handleScreenShareRequest('screen', activeLiveViewNegotiationId, activeLiveViewTeachingSessionId);
+      fetchLiveViewIceConfiguration = originalIceFetch;
+      ensureOffscreenDocument = originalOffscreenSetup;
+      if (retiredCaptureOperations) throw new Error('The current manifest admitted a retired screen capture');
+
+      // Exercise the historical privileged lifecycle independently of the shipped manifest.
+      const actualManifest = chrome.runtime.getManifest;
+      chrome.runtime.getManifest = () => ({ ...actualManifest(), permissions: [...actualManifest().permissions, 'tabCapture'] });
       const originalFetchLiveViewIceConfiguration = fetchLiveViewIceConfiguration;
       const originalEnsureOffscreenDocument = ensureOffscreenDocument;
+      const originalTabCapture = chrome.tabCapture;
+      if (!originalTabCapture) chrome.tabCapture = {};
       const originalTabCaptureGetMediaStreamId = chrome.tabCapture.getMediaStreamId;
       const originalStartCancelTabsQuery = chrome.tabs.query;
       fetchLiveViewIceConfiguration = async () => ({
@@ -1491,10 +1508,12 @@ async function main() {
         negotiationId: activeLiveViewNegotiationId,
       };
       sendToOffscreen = originalSendToOffscreen;
+      chrome.runtime.getManifest = actualManifest;
       fetchLiveViewIceConfiguration = originalFetchLiveViewIceConfiguration;
       ensureOffscreenDocument = originalEnsureOffscreenDocument;
       chrome.tabs.query = originalStartCancelTabsQuery;
-      chrome.tabCapture.getMediaStreamId = originalTabCaptureGetMediaStreamId;
+      if (originalTabCapture) chrome.tabCapture.getMediaStreamId = originalTabCaptureGetMediaStreamId;
+      else delete chrome.tabCapture;
 
       // A socket-close continuation cannot clean up B's teacher broadcast or
       // Live View after identity and transport ownership move to B.

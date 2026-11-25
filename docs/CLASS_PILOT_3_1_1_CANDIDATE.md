@@ -5,6 +5,16 @@ Ask Question and Send buttons, and the empty message text in both render paths.
 The six affected pieces of normal-sized text use a minimum contrast ratio of
 4.5:1 against their backgrounds.
 
+## Reduce access for retired streaming
+
+This candidate removes the required tabCapture and optional desktopCapture
+permissions. The production service retired Live View and parked its TURN
+infrastructure. A stale request cannot start a legacy stream or screen picker.
+The remaining all-sites host grant and tabs.captureVisibleTab support the active
+thumbnail feature. The offscreen permission preserves classroom WebSocket and
+preview timing. Google Admin kiosk identity and enterprise.deviceAttributes stay
+unchanged. Existing historical lifecycle tests exercise simulated old privileges.
+
 ## Verify and package
 
 Use the prepared source and package commands in CLAUDE.md. Check the configured,

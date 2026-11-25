@@ -3253,6 +3253,9 @@ async function main() {
         };
         const iceConfiguration = await fetchLiveViewIceConfiguration('negotiation-1', authB);
 
+        // Exercise the historical privileged lifecycle independently of the shipped manifest.
+        const actualManifest = chrome.runtime.getManifest;
+        chrome.runtime.getManifest = () => ({ ...actualManifest(), permissions: [...actualManifest().permissions, 'tabCapture'] });
         const originalFetchLiveViewIceConfiguration = fetchLiveViewIceConfiguration;
         const originalEnsureOffscreenDocument = ensureOffscreenDocument;
         const originalSendToOffscreen = sendToOffscreen;
@@ -3305,6 +3308,7 @@ async function main() {
         await staleLiveViewStartPromise;
         const staleLiveViewPreservedCurrent = activeLiveViewNegotiationId === 'current-live-view-n2'
           && activeLiveViewContext?.startGeneration === currentLiveViewStartGeneration;
+        chrome.runtime.getManifest = actualManifest;
         fetchLiveViewIceConfiguration = originalFetchLiveViewIceConfiguration;
         ensureOffscreenDocument = originalEnsureOffscreenDocument;
         sendToOffscreen = originalSendToOffscreen;

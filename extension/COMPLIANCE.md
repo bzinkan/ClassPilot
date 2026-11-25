@@ -67,7 +67,7 @@ ClassPilot does not intentionally collect keystrokes, typed passwords,
 microphone audio, camera video, incognito/private-window activity, or personal
 browsing from unmanaged user profiles.
 
-## Live Viewing And Screenshots
+## Classroom screenshots
 
 In negotiated tracking-window mode, with the separately controlled active-view
 capability enabled, the extension takes a JPEG thumbnail of the
@@ -99,17 +99,11 @@ transition. The current SchoolPilot Safety Center does not issue this command
 for classifier findings. Neither this legacy path nor ordinary capture runs
 in safety-only mode.
 
-Live View remains backend-only; the teacher Live View UI stays disabled in the
-2.9.0 candidate, as in 2.8.9, including when the scheduled classroom rollout is
-enabled.
-The retained protocol supports an explicitly authorized active-class request.
-On managed ChromeOS devices, a school Chrome policy can allow silent
-tab capture; otherwise Chrome may show a screen picker. Server-authorized,
-short-lived ICE configuration may route encrypted WebRTC media through
-SchoolPilot TURN relays when a direct connection is unavailable. The extension
-and SchoolPilot servers do not record Live View streams. The retained Live View
-implementation supports teacher-initiated local recordings and still images,
-which the school controls; those controls remain unavailable while its UI is disabled.
+SchoolPilot retired teacher Live View and its TURN relay. Chromebook 3.1.1
+removes the required tabCapture permission and optional desktopCapture permission.
+Classroom thumbnails use chrome.tabs.captureVisibleTab on the active visible tab.
+The offscreen document supports the classroom WebSocket and authorized preview
+cadence. Legacy streaming requests are rejected before media acquisition.
 
 Scheduled classroom activation requires the paired SchoolPilot API/worker
 deployment and additive `classpilot-scheduled-classroom-20260915` migration.
@@ -253,13 +247,8 @@ no Chrome permission and no managed-policy schema field.
 ClassPilot processes school-issued identifiers, active-tab activity, tab
 titles and URLs, website content visible in tracking-window screenshots,
 and student/teacher communications to provide classroom monitoring and
-messaging. Authorized Live View streams are temporary, encrypted in transit,
-and not recorded by the extension or SchoolPilot servers, but they may be
-relayed through SchoolPilot TURN servers. The authorized teacher dashboard can
-explicitly save a local recording or still image; that downloaded copy is
-controlled by the school.
-ClassPilot does not claim that Live View or the extension operates without
-processing personal data.
+messaging. The student popup displays the school-managed monitoring status.
+Periodic screenshots may show website content on the active tab.
 
 Schools may select **Safety only** after-hours monitoring. In that mode,
 ClassPilot sends the current tab's URL and title for safety classification and
@@ -317,9 +306,8 @@ Before each Chrome Web Store upload:
   of student-session/gap pixels, review-first safety findings,
   managed-device kiosk continuity, school-configured restricted sign-in,
   safety-only after-hours URL/title observations, school website-policy
-  enforcement, and the retained TURN-relayed Live View contract. Do not describe
-  the disabled Live View UI as an available feature.
-- Follow `../CLASSPILOT_2_8_9_RELEASE.md` for the current candidate gate.
+  enforcement, and the actual screenshot feature.
+- Follow `../docs/CLASS_PILOT_3_1_1_CANDIDATE.md` for the current candidate gate.
   Preparing this version does not authorize packaging, Store upload,
   publication or scheduled classroom capability activation.
 - Test the exact release package on controlled Google Admin-managed Chromebooks

@@ -727,6 +727,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
       if (message.type === 'START_SHARE') {
+        if (!chrome.runtime.getManifest?.()?.permissions?.includes('tabCapture')) {
+          sendResponse({ success: false, status: 'live-view-retired' });
+          return;
+        }
         const result = await startScreenCapture(
           message.mode,
           message.streamId,

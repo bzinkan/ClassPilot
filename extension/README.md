@@ -4,7 +4,8 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 
 The prepared Chromebook candidate is **3.1.1**. The student popup improves text
 contrast for the heading, school name, detected email, two messaging controls
-and empty inbox. See the [3.1.1 candidate record](../docs/CLASS_PILOT_3_1_1_CANDIDATE.md).
+and empty inbox. It also removes the access previously declared for the retired
+Live View feature. See the [3.1.1 candidate record](../docs/CLASS_PILOT_3_1_1_CANDIDATE.md).
 
 The release retains 3.0.9’s entire-website Focus on
 `classroom.google.com` includes Google Docs, Drive, Sheets, Slides, Forms and

@@ -22,12 +22,8 @@
     "identity.email",
     "scripting",
     "declarativeNetRequest",
-    "tabCapture",
     "offscreen",
     "enterprise.deviceAttributes"
-  ],
-  "optional_permissions": [
-    "desktopCapture"
   ],
   "host_permissions": [
     "<all_urls>"

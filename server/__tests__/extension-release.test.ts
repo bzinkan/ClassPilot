@@ -148,7 +148,7 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("supportDetails");
   });
 
-  it("keeps the 2.8.9 permission, managed-policy and update-timing surface unchanged", () => {
+  it("keeps active classroom permissions and excludes both retired streaming permissions", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
     expect(manifest.permissions).toEqual([
       "tabs",
@@ -162,11 +162,10 @@ describe("ClassPilot extension release package guards", () => {
       "identity.email",
       "scripting",
       "declarativeNetRequest",
-      "tabCapture",
       "offscreen",
       "enterprise.deviceAttributes",
     ]);
-    expect(manifest.optional_permissions).toEqual(["desktopCapture"]);
+    expect(manifest.optional_permissions ?? []).toEqual([]);
     expect(manifest.host_permissions).toEqual(["<all_urls>"]);
 
     const schema = JSON.parse(readRepoFile("extension/managed_schema.json"));

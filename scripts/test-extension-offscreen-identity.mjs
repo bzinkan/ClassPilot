@@ -279,6 +279,9 @@ function dispatchOffscreenMessage(message) {
   });
 }
 
+const retiredFrame = await dispatchOffscreenMessage({ type: 'START_SHARE', mode: 'screen' });
+assert.equal(retiredFrame.status, 'live-view-retired', 'the shipped offscreen entry must reject streaming before a picker or media access');
+
 function startLiveView(identity, { mode = 'tab', streamId = 'stream-id' } = {}) {
   return evaluate(`startScreenCapture(
     ${JSON.stringify(mode)},
